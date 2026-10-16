@@ -291,6 +291,112 @@ def test_banana_console(qapp, cfg):
     window.close()
 
 
+def test_intellipan_pad(qapp, mixer):
+    from ui.strip_widget import VU_BAR_WIDTH, VU_GAP
+
+    window, vm, _ = mixer
+    pad = window.strips[1].pad                     # Musique : entrée matérielle
+    assert pad.modes() == ("color", "pan", "fx") and pad.mode() == "color"
+    assert window.strips[2].pad.modes() == ("pan",)   # Appels : entrée virtuelle
+    assert window.strips[1].vu.width() == 2 * VU_BAR_WIDTH + VU_GAP
+
+    area = pad._area()
+    drag(pad, (area.center().x(), area.bottom() - 2), (area.right() - 1, area.top() + 1))
+    pump(qapp, 0.05)
+    assert vm._strips[1].pad("color") == (0.5, 1.0)          # coin haut droit
+    send(pad, QEvent.Type.MouseButtonDblClick, (area.center().x(), area.center().y()))
+    pump(qapp, 0.05)
+    assert vm._strips[1].pad("color") == (0.0, 0.0)          # double-clic : neutre
+
+    pad.set_mode("pan")                            # (menu du mode)
+    click(pad, (area.left() + 1, area.center().y()))
+    pump(qapp, 0.05)
+    assert vm._strips[1].pad("pan")[0] == -0.5 and vm._strips[1].pad("color") == (0.0, 0.0)
+    assert window._cfg["ui"]["pad_modes"][1] == "pan"
+    vm.set_pad(1, "pan", 0.25, 0.5)                # valeur venant de Voicemeeter
+    pump(qapp, 0.05)
+    assert pad.value() == (0.25, 0.5)
+
+
+def test_theme_switch_from_settings(qapp, mixer):
+    from ui import styles
+    from ui.settings_dialog import SettingsDialog
+
+    window, vm, reaper = mixer
+    dialog = SettingsDialog(window._cfg, None, reaper, vm, window, persist=False)
+    dialog.appearanceChanged.connect(window.apply_appearance)
+    try:
+        dialog.theme_swatches["orange"].click()
+        assert window._cfg["ui"]["theme"] == "orange" and styles.current_theme() == "orange"
+        assert styles.GREEN_NEON == styles.THEMES["orange"][1]
+        assert styles.THEMES["orange"][1] in qapp.styleSheet()
+        dialog.set_theme("#00aaff")                # couleur personnalisée
+        assert styles.current_theme() == "#00aaff" and not dialog.theme_swatches["orange"].isChecked()
+        assert "personnalisée" in dialog.theme_label.text()
+    finally:
+        dialog.set_theme("neon")
+        dialog.done(0)
+    assert styles.GREEN_NEON == "#00ff88"
+
+
+def test_tray_double_click_and_restore_maximized(qapp, mixer):
+    from PySide6.QtWidgets import QSystemTrayIcon
+
+    class FakeTray:
+        def showMessage(self, *args):  # noqa: N802 (API Qt)
+            pass
+
+        def hide(self):
+            pass
+
+    window, _, _ = mixer
+    window._tray = FakeTray()
+    window._cfg["ui"]["minimize_to_tray"] = True
+    reason = QSystemTrayIcon.ActivationReason
+    window.showMaximized()
+    pump(qapp, 0.05)
+    window.minimize()
+    pump(qapp, 0.05)
+    assert not window.isVisible()
+    window._on_tray_activated(reason.Trigger)        # double-clic Windows : Trigger…
+    window._on_tray_activated(reason.DoubleClick)    # … puis DoubleClick
+    pump(qapp, 0.05)
+    assert window.isVisible() and window.isMaximized()
+    window.showNormal()
+    window.show_from_tray()
+
+
+def test_second_launch_shows_window(qapp):
+    import main
+
+    shown = []
+    server = main.listen_for_show_requests(lambda: shown.append(True))
+    try:
+        assert main.request_show()
+        pump(qapp, 0.3)
+        assert shown
+    finally:
+        server.close()
+    assert not main.request_show()                   # plus personne n'écoute
+
+
+def test_banana_keeps_potato_sends_and_blank_project(qapp, cfg):
+    from core.demo import DemoProcesses, DemoReaper, DemoVoicemeeter
+    from ui.main_window import MainWindow, running_config
+
+    cfg["state"] = {"strips": [{"gain": 0, "sends": [-1.0, -2.0, -3.0, -4.0]}]}
+    cfg["voicemeeter"]["kind"] = "banana"
+    vm, reaper = DemoVoicemeeter(cfg), DemoReaper(cfg)
+    window = MainWindow(cfg=cfg, vm=vm, reaper=reaper, processes=DemoProcesses(), persist=False)
+    window.show()
+    pump(qapp, 0.1)
+    cfg["voicemeeter"]["kind"] = "potato"             # choisi pour le prochain démarrage
+    assert running_config(cfg, vm)["voicemeeter"]["kind"] == "banana"
+    assert running_config(cfg, vm)["reaper"] is cfg["reaper"]
+    window.close()
+    assert cfg["state"]["strips"][0]["sends"] == [-1.0, -2.0, -3.0, -4.0]
+
+
 def test_state_saved_on_close(qapp, mixer):
     window, vm, _ = mixer
     vm.set_route(1, 2, True)

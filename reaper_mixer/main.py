@@ -36,15 +36,17 @@ from typing import Callable
 
 from PySide6.QtCore import QLockFile, QRectF, QThread, Qt, QtMsgType, QUrl, Signal, qInstallMessageHandler
 from PySide6.QtGui import QColor, QDesktopServices, QFontDatabase, QIcon, QPainter, QPixmap
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QSplashScreen
 
 from core import config
-from core.process_manager import (AppNotInstalledError, ProcessManager, ProcessManagerError,
-                                  StartupAborted)
+from core.process_manager import (AppNotInstalledError, OtherEditionRunningError, ProcessManager,
+                                  ProcessManagerError, StartupAborted,
+                                  installed_voicemeeter_kinds)
 from core.reaper_ctrl import ReaperController
-from core.voicemeeter_ctrl import VoicemeeterController
+from core.voicemeeter_ctrl import EDITIONS, VoicemeeterController, edition
 from ui import styles
-from ui.main_window import MainWindow
+from ui.main_window import MainWindow, launch_restart
 
 log = logging.getLogger("reaper_mixer")
 
@@ -55,6 +57,7 @@ BRIDGE_PING_TIMEOUT_S = 1.0  # attente d'un battement de cœur du pont
 BRIDGE_RETRY_S = 0.5         # pause entre deux attentes
 STARTUP_CANCEL_WAIT_MS = 5000
 RESTART_WAIT_MS = 45000      # --restart : attente de la fin de l'instance précédente
+SHOW_REQUEST_TIMEOUT_MS = 1500  # 2e lancement : demande à l'instance ouverte de s'afficher
 WINDOWS_APP_ID = "REKA.Console"
 
 
@@ -290,8 +293,8 @@ class StartupWorker(QThread):
             try:
                 action()
                 return
-            except StartupAborted:
-                raise
+            except (StartupAborted, ProcessManagerError):
+                raise                      # pas la peine d'insister (autre édition ouverte…)
             except Exception as exc:
                 if time.monotonic() + interval_s > deadline:
                     raise StartupTimeout(what, timeout_s, hint) from exc
@@ -368,6 +371,8 @@ class MixerApp:
         self._splash.hide()
         if isinstance(exc, AppNotInstalledError):
             retry = self._ask_missing_app(exc)
+        elif isinstance(exc, OtherEditionRunningError):
+            retry = self._ask_other_edition(exc)
         else:
             retry = self._ask_retry(exc)
         if retry:
@@ -390,15 +395,30 @@ class MixerApp:
         box.setInformativeText(
             f"S'il est déjà installé ailleurs, clique sur « Localiser… » "
             f"et sélectionne {exc.exe_name}.")
+        # Voicemeeter : une autre édition est peut-être installée (Banana seule…)
+        other = None
+        if exc.config_key == "voicemeeter":
+            current = edition(self._cfg).kind
+            others = [kind for kind in installed_voicemeeter_kinds(self._cfg["voicemeeter"].get("path"))
+                      if kind != current]
+            other = others[0] if others else None
+        switch = None
+        if other is not None:
+            name = EDITIONS[other].label.split(" (")[0]
+            box.setInformativeText(f"{name} est installé : REKA peut l'utiliser à la place.")
+            switch = box.addButton(f"Utiliser {name}", QMessageBox.ButtonRole.ActionRole)
         download = box.addButton("Télécharger", QMessageBox.ButtonRole.ActionRole)
         locate = box.addButton("Localiser…", QMessageBox.ButtonRole.ActionRole)
         retry = box.addButton("Réessayer", QMessageBox.ButtonRole.AcceptRole)
         box.addButton("Quitter", QMessageBox.ButtonRole.RejectRole)
-        box.setDefaultButton(download)
+        box.setDefaultButton(switch or download)
 
         while True:
             box.exec()
             clicked = box.clickedButton()
+            if switch is not None and clicked is switch:
+                self._switch_edition(other)
+                return False
             if clicked is download:
                 QDesktopServices.openUrl(QUrl(exc.download_url))
                 continue  # la popup reste là le temps d'installer
@@ -413,6 +433,43 @@ class MixerApp:
                 log.info("%s localisé manuellement : %s", exc.app_name, path)
                 return True
             return clicked is retry
+
+    def _ask_other_edition(self, exc: OtherEditionRunningError) -> bool:
+        """Une autre édition de Voicemeeter est ouverte : l'utiliser, ou la fermer
+        soi-même puis réessayer."""
+        box = QMessageBox()
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(config.APP_NAME)
+        box.setText(str(exc))
+        box.setInformativeText(exc.hint)
+        switch = None
+        if exc.running_kind in EDITIONS:
+            name = EDITIONS[exc.running_kind].label.split(" (")[0]
+            switch = box.addButton(f"Utiliser {name}", QMessageBox.ButtonRole.ActionRole)
+        retry = box.addButton("Réessayer", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Quitter", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(switch or retry)
+        box.exec()
+        if switch is not None and box.clickedButton() is switch:
+            self._switch_edition(exc.running_kind)
+            return False
+        return box.clickedButton() is retry
+
+    def _switch_edition(self, kind: str) -> None:
+        """Passe REKA sur une autre édition de Voicemeeter : config, puis
+        redémarrage (les contrôleurs et le projet vierge en dépendent)."""
+        log.info("Passage sur l'édition %s de Voicemeeter.", kind)
+        self._cfg.setdefault("voicemeeter", {})["kind"] = kind
+        config.save_config(self._cfg)
+        if not launch_restart():
+            QMessageBox.information(None, config.APP_NAME,
+                                    "Édition enregistrée : relance REKA pour l'utiliser.")
+
+    def show_window(self) -> None:
+        """REKA relancée alors qu'elle tourne déjà (cachée près de l'horloge) :
+        on ré-affiche la fenêtre."""
+        if self._window is not None:
+            self._window.show_from_tray()
 
     def _ask_retry(self, exc: Exception) -> bool:
         box = QMessageBox()
@@ -467,6 +524,45 @@ def _safely(func: Callable, *args, **kwargs) -> None:
 # --------------------------------------------------------------------------- #
 # Point d'entrée
 # --------------------------------------------------------------------------- #
+def _instance_name() -> str:
+    """Nom du canal local entre deux lancements de REKA (propre à l'utilisateur)."""
+    user = os.environ.get("USERNAME") or os.environ.get("USER") or "user"
+    return f"{config.APP_NAME}-{user}-show"
+
+
+def request_show() -> bool:
+    """Demande à l'instance déjà ouverte de s'afficher ; False si elle ne répond pas."""
+    socket = QLocalSocket()
+    socket.connectToServer(_instance_name())
+    if not socket.waitForConnected(SHOW_REQUEST_TIMEOUT_MS):
+        return False
+    socket.write(b"show\n")
+    socket.waitForBytesWritten(SHOW_REQUEST_TIMEOUT_MS)
+    socket.disconnectFromServer()
+    return True
+
+
+def listen_for_show_requests(on_show: Callable[[], None]) -> QLocalServer:
+    server = QLocalServer()
+    server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)
+    name = _instance_name()
+    if not server.listen(name):
+        QLocalServer.removeServer(name)     # canal resté d'une instance plantée
+        if not server.listen(name):
+            log.warning("Canal « afficher REKA » indisponible : %s", server.errorString())
+
+    def on_connection() -> None:
+        # Toute connexion vaut demande d'affichage (le message n'a pas d'autre sens)
+        while server.hasPendingConnections():
+            connection = server.nextPendingConnection()
+            connection.disconnected.connect(connection.deleteLater)
+            connection.disconnectFromServer()
+        on_show()
+
+    server.newConnection.connect(on_connection)
+    return server
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog=config.APP_NAME, add_help=False)
     parser.add_argument("--demo", action="store_true")
@@ -543,6 +639,17 @@ def run_selftest(app: QApplication, cfg: dict, window: MainWindow, vm, reaper, p
         capture(image.with_name(f"{image.stem}_{suffix}{image.suffix}"), settings)
     for widget in (settings, vst, project, splash):
         widget.hide()
+    # Thème de couleur appliqué à chaud (violet), puis retour au thème d'origine
+    ui_cfg = cfg.setdefault("ui", {})
+    original = ui_cfg.get("theme", styles.DEFAULT_THEME)
+    ui_cfg["theme"] = "violet"
+    window.apply_appearance()
+    pump(0.4)
+    if styles.current_theme() != "violet":
+        problems.append("thème de couleur non appliqué")
+    capture(image.with_name(f"{image.stem}_theme{image.suffix}"), window)
+    ui_cfg["theme"] = original
+    window.apply_appearance()
 
     report.extend(f"ERREUR {p}" for p in problems)
     report.append("RÉSULTAT : " + ("ÉCHEC" if problems else "OK"))
@@ -578,7 +685,8 @@ def main() -> int:
                              "Réinstalle l'application.")
         return 1
     apply_log_level(cfg.get("log_level", "INFO"))
-    styles.apply_theme(app, float(cfg.get("ui", {}).get("panel_opacity", 1.0)))
+    ui_cfg = cfg.get("ui", {})
+    styles.apply_theme(app, float(ui_cfg.get("panel_opacity", 1.0)), ui_cfg.get("theme"))
 
     if args.demo or args.selftest:
         return run_demo(app, cfg, args.selftest)
@@ -587,16 +695,19 @@ def main() -> int:
     # Après un redémarrage, on laisse à l'ancienne instance le temps de s'arrêter.
     lock = QLockFile(str(config.app_data_dir() / "instance.lock"))
     if not lock.tryLock(RESTART_WAIT_MS if args.restart else 100):
-        QMessageBox.information(None, config.APP_NAME, f"{config.APP_NAME} est déjà ouvert.")
+        if not request_show():
+            QMessageBox.information(None, config.APP_NAME, f"{config.APP_NAME} est déjà ouvert.")
         return 0
     if args.restart:
         cfg = config.load_config()   # relue : l'ancienne instance a pu l'écrire en partant
 
     mixer = MixerApp(app, cfg, log_path)
+    server = listen_for_show_requests(mixer.show_window)
     app.aboutToQuit.connect(mixer.shutdown)
     mixer.start()
     exit_code = app.exec()
 
+    server.close()
     lock.unlock()
     log.info("=== %s arrêté (code %d) ===", config.APP_NAME, exit_code)
     return exit_code

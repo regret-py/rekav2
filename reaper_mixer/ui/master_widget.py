@@ -141,7 +141,7 @@ class ConnectionBadge(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = QRectF(0.5, 0.5, self.width() - 1, self.height() - 1)
         p.setPen(QPen(QColor(styles.BORDER_COLUMN), 1))
-        p.setBrush(QColor("#030b06"))
+        p.setBrush(QColor(styles.BG_DEEP))
         p.drawRoundedRect(rect, rect.height() / 2, rect.height() / 2)
 
         dot = QColor(styles.GREEN_NEON if self._ok else styles.RED_MUTE)
@@ -183,7 +183,7 @@ class ProjectButton(QAbstractButton):
         rect = QRectF(0.5, 0.5, self.width() - 1, self.height() - 1)
         hover = self.underMouse()
         p.setPen(QPen(QColor(styles.GREEN_DIM if hover else styles.BORDER_COLUMN), 1))
-        p.setBrush(QColor(styles.BUTTON_HOVER if hover else "#030b06"))
+        p.setBrush(QColor(styles.BUTTON_HOVER if hover else styles.BG_DEEP))
         p.drawRoundedRect(rect, rect.height() / 2, rect.height() / 2)
         # Petite icône de dossier
         p.setPen(QPen(QColor(styles.TEXT_SECONDARY), 1.2))
@@ -265,7 +265,7 @@ class MasterWidget(QFrame):
         vu_box = QHBoxLayout(vu_section)
         vu_box.setContentsMargins(0, 12, 0, 12)
         vu_box.addStretch(1)
-        self.vu = VuMeter(channels=2, bar_width=5, gap=26, margin_top=4, margin_bottom=4,
+        self.vu = VuMeter(channels=2, bar_width=10, gap=24, margin_top=4, margin_bottom=4,
                           clip_leds=True)
         vu_box.addWidget(self.vu)
         vu_box.addStretch(1)

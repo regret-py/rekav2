@@ -10,6 +10,7 @@ zone de notification (icône à côté de l'horloge).
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -33,8 +34,11 @@ log = logging.getLogger(__name__)
 STRIP_GAP = 12
 FOCUS_PLUGIN_DELAY_MS = 400
 TOAST_MS = 4500
-COMPACT_HEIGHT = 780          # hauteur de la fenêtre compacte (comme Voicemeeter)
-MIN_HEIGHT = 640
+COMPACT_HEIGHT = 860          # hauteur de la fenêtre compacte (comme Voicemeeter)
+MIN_HEIGHT = 680
+# Augmenté quand la disposition des strips change (0.4 : Intellipan) : la
+# taille mémorisée, prévue pour l'ancienne disposition, est alors ignorée.
+LAYOUT_VERSION = 2
 DEFAULT_DARKNESS = 0.45       # assombrissement de l'image d'arrière-plan
 DEFAULT_PANEL_OPACITY = 1.0
 
@@ -51,6 +55,30 @@ def restart_command() -> tuple[str, list[str]]:
     if getattr(sys, "frozen", False):
         return sys.executable, ["--restart"]
     return sys.executable, [str(Path(sys.argv[0]).resolve()), "--restart"]
+
+
+def launch_restart() -> bool:
+    """Lance la nouvelle instance de REKA (détachée) ; l'appelant quitte ensuite."""
+    program, args = restart_command()
+    # Exe PyInstaller « onefile » : sans cette variable, la nouvelle instance
+    # se croirait un sous-processus de celle-ci et réutiliserait son dossier
+    # temporaire, supprimé dès que cette instance se ferme.
+    os.environ["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    if not QProcess.startDetached(program, args):
+        return False
+    log.info("Redémarrage de REKA : %s %s", program, " ".join(args))
+    return True
+
+
+def running_config(cfg: dict, vm) -> dict:
+    """La config vue par la session en cours : l'édition de Voicemeeter qui
+    tourne, même si une autre a été choisie pour le prochain démarrage (le
+    projet vierge doit correspondre aux canaux réellement câblés). Les autres
+    sections sont partagées : ce qui y est écrit va dans la vraie config."""
+    kind = getattr(getattr(vm, "edition", None), "kind", None)
+    if not kind or cfg.get("voicemeeter", {}).get("kind") == kind:
+        return cfg
+    return {**cfg, "voicemeeter": {**cfg.get("voicemeeter", {}), "kind": kind}}
 
 
 class Background(QWidget):
@@ -105,9 +133,7 @@ class Toast(QLabel):
         super().__init__(parent)
         self.setWordWrap(True)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setStyleSheet(
-            f"background: {styles.BG_COLUMN}; border: 1px solid {styles.GREEN_DIM};"
-            f"border-radius: 10px; padding: 8px 14px; color: {styles.TEXT_PRIMARY};")
+        self.refresh_style()
         self._effect = QGraphicsOpacityEffect(self)
         self.setGraphicsEffect(self._effect)
         self._fade = QPropertyAnimation(self._effect, b"opacity", self)
@@ -117,6 +143,11 @@ class Toast(QLabel):
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(lambda: self._animate(0.0))
         self.hide()
+
+    def refresh_style(self) -> None:
+        self.setStyleSheet(
+            f"background: {styles.BG_COLUMN}; border: 1px solid {styles.GREEN_DIM};"
+            f"border-radius: 10px; padding: 8px 14px; color: {styles.TEXT_PRIMARY};")
 
     def show_message(self, text: str) -> None:
         self.setText(text)
@@ -155,6 +186,7 @@ class MainWindow(QMainWindow):
         self._reaper_ok = reaper.is_connected
         self._device_warned = False
         self._tray_hint_shown = False
+        self._restore_maximized = False
         self._tracks: list = reaper.strip_tracks   # piste REAPER de chaque strip (ou None)
 
         ui_cfg = cfg.setdefault("ui", {})
@@ -170,10 +202,13 @@ class MainWindow(QMainWindow):
         labels = [route.get("label", route.get("bus", "?")) for route in routing]
         names = list(ui_cfg.get("strip_names", []))
         sends = bool(getattr(vm, "supports_sends", True))
+        pad_modes = list(ui_cfg.get("pad_modes", []))
         self.strips: list[StripWidget] = []
         for index in range(vm.strip_count):
             name = names[index] if index < len(names) else f"Strip {index + 1}"
-            strip = StripWidget(index, name, labels, sends_adjustable=sends)
+            strip = StripWidget(index, name, labels, sends_adjustable=sends,
+                                pad_modes=vm.pad_modes(index), physical=vm.is_physical(index),
+                                pad_mode=pad_modes[index] if index < len(pad_modes) else None)
             self._wire_strip(strip)
             layout.addWidget(strip)
             self.strips.append(strip)
@@ -222,6 +257,8 @@ class MainWindow(QMainWindow):
         strip.muteToggled.connect(vm.set_mute)
         strip.routeToggled.connect(vm.set_route)
         strip.sendChanged.connect(vm.set_send)
+        strip.padMoved.connect(vm.set_pad)
+        strip.padModeChanged.connect(self._on_pad_mode)
         strip.renamed.connect(self._on_renamed)
         strip.chainToggled.connect(reaper.set_chain_enabled)
         strip.fxAddRequested.connect(self.add_effect)
@@ -301,6 +338,12 @@ class MainWindow(QMainWindow):
                 "Virtual ASIO » comme carte son de REAPER (⚙ Réglages → préférences audio).")
 
     # ------------------------------------------------------- actions UI
+    def _on_pad_mode(self, index: int, mode: str) -> None:
+        """Mode d'Intellipan choisi pour une strip : retenu pour la prochaine fois."""
+        modes = self._cfg.setdefault("ui", {}).setdefault("pad_modes", [])
+        modes.extend([None] * (index + 1 - len(modes)))
+        modes[index] = mode
+
     def _on_renamed(self, index: int, name: str) -> None:
         names = self._cfg.setdefault("ui", {}).setdefault("strip_names", [])
         while len(names) <= index:
@@ -354,13 +397,23 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ apparence
     def apply_appearance(self) -> None:
-        """Arrière-plan et transparence des panneaux, d'après la config."""
+        """Thème de couleur, arrière-plan et transparence des panneaux, d'après la config."""
         ui_cfg = self._cfg.get("ui", {})
+        theme = ui_cfg.get("theme", styles.DEFAULT_THEME)
+        theme_changed = theme != styles.current_theme()
+        if theme_changed:
+            styles.set_theme(theme)
         self.background.set_image(background_image_path(self._cfg),
                                   float(ui_cfg.get("background_darkness", DEFAULT_DARKNESS)))
         app = QApplication.instance()
         if app is not None:
-            styles.set_panel_opacity(app, float(ui_cfg.get("panel_opacity", DEFAULT_PANEL_OPACITY)))
+            styles.refresh(app, float(ui_cfg.get("panel_opacity", DEFAULT_PANEL_OPACITY)))
+        if theme_changed:
+            # Widgets dessinés à la main : ils relisent la palette en se redessinant
+            self.toast.refresh_style()
+            for widget in self.findChildren(QWidget):
+                widget.update()
+            self.update()
 
     # -------------------------------------------------------------- fenêtre
     def compact_size(self) -> tuple[int, int]:
@@ -371,8 +424,11 @@ class MainWindow(QMainWindow):
     def _restore_geometry(self) -> None:
         width, _ = self.compact_size()
         self.setMinimumSize(width, MIN_HEIGHT)
-        saved = self._cfg.get("ui", {}).get("geometry")
-        if saved and self.restoreGeometry(QByteArray.fromBase64(saved.encode("ascii"))):
+        ui_cfg = self._cfg.setdefault("ui", {})
+        saved = ui_cfg.get("geometry")
+        same_layout = ui_cfg.get("layout_version") == LAYOUT_VERSION
+        ui_cfg["layout_version"] = LAYOUT_VERSION
+        if saved and same_layout and self.restoreGeometry(QByteArray.fromBase64(saved.encode("ascii"))):
             return
         self.reset_window_size()
 
@@ -398,6 +454,8 @@ class MainWindow(QMainWindow):
         if self._to_tray():
             # Fenêtre cachée : fermer une popup ne doit pas quitter REKA
             QApplication.setQuitOnLastWindowClosed(False)
+            if self.isVisible() and not self.isMinimized():
+                self._restore_maximized = self.isMaximized()
             self.hide()
             if not self._tray_hint_shown:
                 self._tray_hint_shown = True
@@ -408,7 +466,10 @@ class MainWindow(QMainWindow):
             self.showMinimized()
 
     def show_from_tray(self) -> None:
-        self.showNormal()
+        if self._restore_maximized:
+            self.showMaximized()
+        else:
+            self.showNormal()
         self.raise_()
         self.activateWindow()
         QApplication.setQuitOnLastWindowClosed(True)
@@ -444,8 +505,11 @@ class MainWindow(QMainWindow):
         return tray
 
     def _on_tray_activated(self, reason) -> None:
-        if reason in (QSystemTrayIcon.ActivationReason.Trigger,
-                      QSystemTrayIcon.ActivationReason.DoubleClick):
+        # Sous Windows, un double-clic envoie Trigger puis DoubleClick : le
+        # double-clic ne fait donc qu'afficher (sinon il annulerait le clic).
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            self.show_from_tray()
+        elif reason == QSystemTrayIcon.ActivationReason.Trigger:
             if self.isVisible() and not self.isMinimized():
                 self.minimize()
             else:
@@ -465,21 +529,20 @@ class MainWindow(QMainWindow):
             self.toast.show_message("Mode démo : pas de redémarrage.")
             return
         self._save_config()
-        program, args = restart_command()
-        if not QProcess.startDetached(program, args):
+        if not launch_restart():
             QMessageBox.warning(self, config.APP_NAME,
                                 "Impossible de relancer REKA automatiquement : relance-la à la main.")
             return
-        log.info("Redémarrage de REKA : %s %s", program, " ".join(args))
         self.close()
 
     def choose_project(self) -> None:
         """Choix du projet REAPER ; il est ouvert tout de suite, sans redémarrer."""
-        dialog = ProjectDialog(self._cfg, current=self._reaper.project_path, parent=self)
+        session_cfg = running_config(self._cfg, self._vm)
+        dialog = ProjectDialog(session_cfg, current=self._reaper.project_path, parent=self)
         if not dialog.exec():
             return
         self._save_config()
-        path = reaper_project(self._cfg, dialog.selected)
+        path = reaper_project(session_cfg, dialog.selected)
         if path is None:
             self.toast.show_message("Projet introuvable.")
             return
@@ -492,7 +555,14 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ fermeture
     def closeEvent(self, event) -> None:  # noqa: N802
         if self._params is not None:
-            self._cfg["state"] = self._params.to_state()
+            state = self._params.to_state()
+            if not getattr(self._vm, "supports_sends", True):
+                # Banana n'a pas de niveaux d'envoi : on garde ceux réglés sur Potato
+                previous = (self._cfg.get("state") or {}).get("strips", [])
+                for strip, old in zip(state["strips"], previous):
+                    if isinstance(old, dict) and "sends" in old:
+                        strip["sends"] = old["sends"]
+            self._cfg["state"] = state
         ui_cfg = self._cfg.setdefault("ui", {})
         ui_cfg["geometry"] = bytes(self.saveGeometry().toBase64()).decode("ascii")
         for legacy in ("width", "height"):   # remplacés par « geometry »

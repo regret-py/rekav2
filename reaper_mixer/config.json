@@ -44,6 +44,8 @@
     "background_image": "",
     "background_darkness": 0.45,
     "panel_opacity": 1.0,
+    "theme": "neon",
+    "pad_modes": [],
     "strip_names": ["Microphone", "Musique", "Appels", "Bureau", "Autres 1", "Autres 2"]
   },
   "state": {}

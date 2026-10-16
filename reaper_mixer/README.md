@@ -64,6 +64,7 @@ sur son insert (désactivable dans ⚙ → Options).
 |---|---|
 | Fader | glisser (Maj = fin), molette, double-clic = 0 dB |
 | Knobs Monitor / Mic Out / Discord / Obs | clic = envoi on/off vers A1 / B1 / B2 / A2, glisser = niveau d'envoi |
+| Intellipan (carré au petit cube rouge) | glisser le cube = régler, double-clic = neutre, clic sur le titre ou clic droit = mode |
 | Muet | coupe la strip |
 | Pill d'effet | clic = ouvrir/fermer l'interface du plugin, clic droit = bypass / supprimer |
 | Emplacement vide (« + ») | ajouter un effet (recherche dans les plugins connus de REAPER) |
@@ -78,10 +79,26 @@ sur son insert (désactivable dans ⚙ → Options).
 `REKA.exe --demo` ouvre la console avec des moteurs simulés (sans Voicemeeter ni REAPER)
 pour la découvrir.
 
+## Intellipan
+
+Comme dans Voicemeeter, chaque strip a son **Intellipan** : un carré où l'on déplace un
+petit cube rouge.
+
+- **Entrées matérielles** (Microphone, Musique, Autres 1) : 3 modes, choisis en cliquant
+  sur le titre du carré (ou clic droit) — **VOIX** (couleur du son, le « Color Panel » de
+  Voicemeeter), **POSITION** (panoramique) et **EFFETS** (écho / modulation).
+- **Entrées virtuelles** (Appels, Bureau, Autres 2) : **POSITION** (panoramique 5.1).
+
+Le mode choisi est retenu pour chaque strip. Double-clic = retour au neutre.
+
 ## Personnaliser l'interface
 
 ⚙ → onglet **Apparence** :
 
+- **Thème de couleur** : vert néon, cyan, bleu, violet, rose, rouge, orange, or, blanc, ou
+  la pastille arc-en-ciel pour n'importe quelle couleur. Toute l'interface change tout de
+  suite (knobs, VU-mètres, boutons, fonds teintés) ; le rouge du Muet et du petit cube
+  reste rouge.
 - **Arrière-plan** : *Choisir une image…* (PNG, JPG, WebP…). L'image est copiée dans
   `%APPDATA%\REKA`, cadrée pour remplir la fenêtre, et peut être assombrie (curseur
   *Assombrir l'image*). *Fond d'origine* revient au fond REKA.
@@ -133,6 +150,12 @@ Les canaux sont ceux de l'insert Voicemeeter (entrée de la piste REAPER). Modif
 - À la fermeture : sauvegarde du projet, inserts rendus, arrêt de REAPER, puis extinction
   propre de Voicemeeter (`Command.Shutdown`). Un Voicemeeter déjà ouvert avant l'app
   n'est pas fermé : il est simplement ré-affiché.
+
+Relancer `REKA.exe` alors que REKA tourne déjà (par exemple cachée près de l'horloge)
+ré-affiche simplement la fenêtre.
+
+Si une autre édition de Voicemeeter est ouverte au démarrage, ou si seule l'autre édition
+est installée, REKA propose de l'utiliser directement.
 
 ## Fichiers
 

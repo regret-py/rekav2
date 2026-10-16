@@ -352,3 +352,108 @@ def test_voicemeeter_controller_banana(qapp, cfg, monkeypatch):
     assert remote.params["patch.insert[6]"] == 1.0 and remote.params["patch.insert[7]"] == 1.0
     vm.close()
     assert remote.params["patch.insert[6]"] == 0.0 and ("Command.Shutdown", 1.0) not in remote.sets
+
+
+def test_intellipan_parameters(qapp, cfg, monkeypatch):
+    from core.voicemeeter_ctrl import (VoicemeeterController, clamp_pad, pad_modes,
+                                       pad_y_range)
+
+    assert pad_modes(0) == ("color", "pan", "fx") and pad_modes(5) == ("pan",)
+    assert pad_modes(3, physical_strips=3) == ("pan",)          # VAIO de Banana
+    assert pad_y_range("color", True) == (0.0, 1.0) and pad_y_range("pan", False) == (-0.5, 0.5)
+    assert clamp_pad("color", True, 2, -1) == (0.5, 0.0)
+
+    remote = FakeRemote()
+    remote.fail_login = 0
+    remote.params.update({"Strip[0].Color_x": 0.25, "Strip[0].Color_y": 0.75,
+                          "Strip[5].Pan_y": -0.2})
+    fake = types.ModuleType("voicemeeterlib")
+    fake.api = lambda kind, **kwargs: remote
+    monkeypatch.setitem(sys.modules, "voicemeeterlib", fake)
+    vm = VoicemeeterController(cfg)
+    params = []
+    vm.params_changed.connect(params.append)
+    vm.login()
+    vm.start_polling()
+    pump(qapp, 0.3)
+    mic, calls = params[-1].strips[0], params[-1].strips[2]
+    assert mic.pad("color") == (0.25, 0.75) and mic.pad("fx") == (0.0, 0.0)
+    assert calls.pads == (("pan", 0.0, -0.2),)                 # entrée virtuelle : Pan seul
+    assert params[-1].to_state()["strips"][0]["pads"]["color"] == [0.25, 0.75]
+
+    vm.set_pad(0, "color", -0.3, 0.4)        # Microphone = strip VM 0 (matérielle)
+    vm.set_pad(2, "pan", 0.1, -0.45)         # Appels = strip VM 5 (virtuelle)
+    vm.set_pad(2, "color", 0.2, 0.2)         # pas de Color sur une entrée virtuelle
+    vm.set_pad(1, "fx", 9, 9)                # borné
+    pump(qapp, 0.2)
+    sets = dict(remote.sets)
+    assert sets["Strip[0].Color_x"] == -0.3 and sets["Strip[0].Color_y"] == 0.4
+    assert sets["Strip[5].Pan_x"] == 0.1 and sets["Strip[5].Pan_y"] == -0.45
+    assert "Strip[5].Color_x" not in sets
+    assert sets["Strip[1].fx_x"] == 0.5 and sets["Strip[1].fx_y"] == 1.0
+
+    vm.apply_state({"strips": [{"pads": {"pan": [0.2, 0.3], "bidon": [1, 1]}}]})
+    pump(qapp, 0.2)
+    assert remote.params["Strip[0].Pan_x"] == 0.2 and remote.params["Strip[0].Pan_y"] == 0.3
+    vm.close()
+
+
+def test_color_themes(qapp):
+    from PySide6.QtGui import QColor
+
+    from ui import styles
+
+    base_dim = styles.GREEN_DIM
+    try:
+        assert styles.set_theme("violet") == "violet"
+        assert styles.GREEN_NEON == styles.THEMES["violet"][1]
+        violet_hue = QColor(styles.THEMES["violet"][1]).hslHueF()
+        assert abs(QColor(styles.GREEN_DIM).hslHueF() - violet_hue) < 0.05   # teintes tournées
+        assert styles.RED_MUTE == "#ff2d2d" and styles.YELLOW_VU == "#ffcc00"
+        assert styles.THEMES["violet"][1] in styles.build_stylesheet()
+        assert styles.set_theme("#123456") == "#123456"            # personnalisé, éclairci
+        assert QColor(styles.GREEN_NEON).lightnessF() >= styles.MIN_ACCENT_LIGHTNESS - 0.01
+        assert styles.set_theme("n'importe quoi") == styles.DEFAULT_THEME
+        assert styles.GREEN_DIM == base_dim and styles.GREEN_NEON == "#00ff88"
+    finally:
+        styles.set_theme(styles.DEFAULT_THEME)
+
+
+def test_blank_project_detection_and_legacy_strip_map(appdata, cfg, tmp_path):
+    from core import config
+    from core.process_manager import blank_project_path, is_blank_project
+    from core.voicemeeter_ctrl import strip_map
+
+    assert is_blank_project(blank_project_path(cfg))
+    assert is_blank_project(config.app_data_dir() / "session-banana.rpp")
+    assert not is_blank_project(tmp_path / "session.rpp")           # projet perso ailleurs
+    assert not is_blank_project(config.app_data_dir() / "session_live.rpp")
+    cfg["voicemeeter"]["strip_map"] = [0, 1, 2, 3, 4, 5]             # clé de la 0.2
+    assert strip_map(cfg) == (0, 1, 2, 3, 4, 5)
+    cfg["voicemeeter"]["strip_maps"]["potato"] = [7, 6]              # la nouvelle clé gagne
+    assert strip_map(cfg) == (7, 6)
+
+
+def test_other_edition_running(qapp, cfg, monkeypatch):
+    from core import process_manager
+    from core.process_manager import OtherEditionRunningError, ProcessManager
+    from core.voicemeeter_ctrl import VoicemeeterController
+
+    monkeypatch.setattr(process_manager, "running_voicemeeter_kind", lambda: "banana")
+    with pytest.raises(OtherEditionRunningError) as error:
+        ProcessManager(cfg).start_voicemeeter()      # Potato voulu, Banana ouvert
+    assert error.value.running_kind == "banana" and "Banana" in error.value.hint
+
+    remote = FakeRemote()
+    remote.fail_login = 0
+    remote.type = "banana"                           # l'API répond : c'est Banana qui tourne
+    fake = types.ModuleType("voicemeeterlib")
+    fake.api = lambda kind, **kwargs: remote
+    monkeypatch.setitem(sys.modules, "voicemeeterlib", fake)
+    vm = VoicemeeterController(cfg)
+    with pytest.raises(OtherEditionRunningError):
+        vm.login()
+    assert remote.logouts == 1
+    remote.type = "potato"
+    vm.login()
+    vm.close()

@@ -1,6 +1,7 @@
 """
 Un strip complet, de haut en bas : effets (REAPER), 4 knobs de routing,
-bouton Muet, fader + VU, nom éditable (double-clic).
+Intellipan (le carré au petit cube rouge de Voicemeeter), bouton Muet,
+fader + VU, nom éditable (double-clic).
 
 Le strip ne parle à aucun moteur : il émet des signaux, la fenêtre principale
 les relaie à Voicemeeter / REAPER, et lui renvoie l'état réel.
@@ -19,12 +20,15 @@ from core.voicemeeter_ctrl import StripParams
 from ui import styles
 from ui.fader import Fader, format_db
 from ui.fx_pill import PILL_HEIGHT, FxPill
+from ui.intellipan import PAD_HEIGHT, IntelliPad
 from ui.knob import Knob
 from ui.vu_meter import ClipLed, VuMeter
 
 STRIP_WIDTH = 133
 FX_SECTION_HEIGHT = 186
 ROUTING_SECTION_HEIGHT = 102
+PAD_SECTION_HEIGHT = PAD_HEIGHT + 8
+VU_BAR_WIDTH, VU_GAP = 7, 3      # VU-mètres des strips (largeur d'une barre, écart)
 MUTE_HEIGHT = 25
 NAME_HEIGHT = 24
 SLOT_PITCH = PILL_HEIGHT + 2
@@ -65,10 +69,10 @@ class FxBadge(QAbstractButton):
         if on:
             p.setPen(QPen(styles.color(styles.GREEN_NEON, 0.25), 3))
             p.setBrush(QColor(styles.GREEN_NEON))
-            ink = QColor("#00341c")
+            ink = QColor(styles.ON_ACCENT)
         else:
             p.setPen(QPen(QColor(styles.GREEN_DIM), 1.5))
-            p.setBrush(QColor("#0d1a14"))
+            p.setBrush(QColor(styles.BADGE_OFF))
             ink = QColor(styles.TEXT_MUTED)
         if self.underMouse():
             p.setBrush(p.brush().color().lighter(112))
@@ -262,9 +266,13 @@ class StripWidget(QFrame):
     fxOpenRequested = Signal(int, int)
     fxBypassRequested = Signal(int, int, bool)
     fxRemoveRequested = Signal(int, int)
+    padMoved = Signal(int, str, float, float)    # (strip, mode, x, y)
+    padModeChanged = Signal(int, str)
 
     def __init__(self, index: int, name: str, route_labels: list[str],
-                 sends_adjustable: bool = True, parent: QWidget | None = None) -> None:
+                 sends_adjustable: bool = True, pad_modes: tuple[str, ...] = ("color", "pan", "fx"),
+                 physical: bool = True, pad_mode: str | None = None,
+                 parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.index = index
         self._sends_adjustable = sends_adjustable   # False : Banana, knobs = interrupteurs
@@ -277,6 +285,7 @@ class StripWidget(QFrame):
         layout.setSpacing(8)
         layout.addWidget(self._build_fx_section())
         layout.addWidget(self._build_routing_section(route_labels))
+        layout.addWidget(self._build_pad_section(pad_modes, physical, pad_mode))
 
         self.mute = QPushButton("Muet")
         self.mute.setObjectName("muteButton")
@@ -351,6 +360,18 @@ class StripWidget(QFrame):
             self.knobs.append(knob)
         return section
 
+    def _build_pad_section(self, modes: tuple[str, ...], physical: bool,
+                           mode: str | None) -> QFrame:
+        section = make_section()
+        section.setFixedHeight(PAD_SECTION_HEIGHT)
+        box = QVBoxLayout(section)
+        box.setContentsMargins(4, 4, 4, 4)
+        self.pad = IntelliPad(modes, physical, mode)
+        self.pad.moved.connect(lambda m, x, y: self.padMoved.emit(self.index, m, x, y))
+        self.pad.modeChanged.connect(lambda m: self.padModeChanged.emit(self.index, m))
+        box.addWidget(self.pad)
+        return section
+
     def _build_fader_section(self) -> QFrame:
         section = make_section()
         box = QVBoxLayout(section)
@@ -373,7 +394,7 @@ class StripWidget(QFrame):
         self.fader = Fader()
         self.fader.valueChanged.connect(self._on_fader)
         body.addWidget(self.fader)
-        self.vu = VuMeter(channels=2, bar_width=3, gap=2)
+        self.vu = VuMeter(channels=2, bar_width=VU_BAR_WIDTH, gap=VU_GAP)
         body.addWidget(self.vu)
         body.addStretch(1)
         box.addLayout(body, 1)
@@ -394,6 +415,7 @@ class StripWidget(QFrame):
             if not knob.isInteracting():
                 knob.setActive(enabled)
                 knob.setValue(send)
+        self.pad.set_values(params.pads)
 
     def set_levels(self, levels: tuple[float, float]) -> None:
         self.vu.set_levels(levels)

@@ -1,8 +1,14 @@
 """
-Palette, polices (Inter embarquée) et feuille de style QSS.
+Palette, thèmes de couleur, polices (Inter embarquée) et feuille de style QSS.
 
 Les widgets dessinés à la main (knob, fader, VU, pills) lisent directement
-les couleurs ci-dessous ; le reste passe par la QSS appliquée à l'application.
+les couleurs ci-dessous (styles.GREEN_NEON…) à chaque dessin ; le reste passe
+par la QSS appliquée à l'application.
+
+Thèmes : la palette de référence est verte. Un thème donne une couleur
+d'accent ; toutes les teintes vertes (accent, fonds teintés, bordures, textes
+gris-vert) tournent vers sa teinte, en gardant leur luminosité. Le rouge du
+mute, le jaune des VU et le blanc ne changent pas.
 """
 
 from __future__ import annotations
@@ -48,6 +54,33 @@ KNOB_CAP_TOP = "#3a4642"      # dégradé du bouton des knobs
 KNOB_CAP_BOTTOM = "#1c2421"
 RED_DIM = "#3a1416"           # LED de saturation éteinte
 TEXT_ON_RED = "#2b0707"
+BG_DEEP = "#030b06"           # fonds très sombres (badge, bouton projet, Intellipan)
+ON_ACCENT = "#00341c"         # encre sur l'accent (badge FX allumé)
+ON_ACCENT_DARK = "#00140a"    # texte des boutons principaux
+BADGE_OFF = "#0d1a14"         # badge FX éteint
+
+# --- Thèmes ----------------------------------------------------------------
+DEFAULT_THEME = "neon"
+THEMES = {                    # clé (config ui.theme) → (nom affiché, accent)
+    "neon": ("Vert néon", "#00ff88"),
+    "cyan": ("Cyan", "#00e5ff"),
+    "bleu": ("Bleu", "#3d8bff"),
+    "violet": ("Violet", "#a66bff"),
+    "rose": ("Rose", "#ff4fb8"),
+    "rouge": ("Rouge", "#ff3b4f"),
+    "orange": ("Orange", "#ff9a1f"),
+    "or": ("Or", "#ffd23f"),
+    "blanc": ("Blanc", "#e9eef0"),
+}
+# Couleurs qui suivent le thème (les autres sont fixes)
+_THEMED = ("BG_PANEL", "BG_PILL", "GREEN_NEON", "GREEN_BRIGHT", "GREEN_DIM", "GREEN_TEXT",
+           "GREEN_LABEL", "GREEN_SCALE", "BG_WINDOW", "BG_GLOW", "BG_COLUMN", "BG_SECTION",
+           "BORDER_COLUMN", "BORDER_SECTION", "TEXT_PRIMARY", "TEXT_SECONDARY", "TEXT_MUTED",
+           "BUTTON_BG", "BUTTON_HOVER", "PILL_BG", "PILL_BORDER", "KNOB_CAP_TOP",
+           "KNOB_CAP_BOTTOM", "BG_DEEP", "ON_ACCENT", "ON_ACCENT_DARK", "BADGE_OFF")
+_BASE = {name: globals()[name] for name in _THEMED}
+MIN_ACCENT_LIGHTNESS = 0.42   # un accent trop sombre serait invisible sur le fond
+_current_theme = DEFAULT_THEME
 
 FONT_FAMILY = "Inter"
 FONT_FALLBACK = "Segoe UI"
@@ -82,30 +115,84 @@ def load_fonts() -> bool:
     return loaded
 
 
+def theme_accent(theme: str | None) -> QColor | None:
+    """Couleur d'accent d'un thème (clé de THEMES ou « #rrggbb »), None si invalide."""
+    if theme in THEMES:
+        return QColor(THEMES[theme][1])
+    accent = QColor(str(theme or ""))
+    return accent if str(theme or "").startswith("#") and accent.isValid() else None
+
+
+def _rotate(value: str, hue_shift: float, saturation: float) -> str:
+    h, s, l, _a = QColor(value).getHslF()
+    if h < 0:                        # gris pur : pas de teinte à tourner
+        return value
+    return QColor.fromHslF((h + hue_shift) % 1.0, max(0.0, min(1.0, s * saturation)), l).name()
+
+
+def set_theme(theme: str | None) -> str:
+    """Recolore la palette d'après le thème ; renvoie le thème appliqué (le
+    thème par défaut si `theme` est inconnu). Appeler ensuite refresh()."""
+    global _current_theme
+    accent = theme_accent(theme)
+    if accent is None:
+        theme, accent = DEFAULT_THEME, QColor(THEMES[DEFAULT_THEME][1])
+    values = dict(_BASE)
+    if theme != DEFAULT_THEME:
+        ah, as_, al, _ = accent.getHslF()
+        if al < MIN_ACCENT_LIGHTNESS:
+            accent = QColor.fromHslF(max(ah, 0.0), as_, MIN_ACCENT_LIGHTNESS)
+            ah, as_, al, _ = accent.getHslF()
+        bh, bs, _bl, _ = QColor(_BASE["GREEN_NEON"]).getHslF()
+        shift = ah - bh if ah >= 0 else 0.0
+        saturation = as_ / bs if ah >= 0 and bs > 0 else 0.0
+        values = {name: _rotate(value, shift, saturation) for name, value in _BASE.items()}
+        values["GREEN_NEON"] = values["GREEN_TEXT"] = accent.name()
+    globals().update(values)
+    _current_theme = theme
+    return theme
+
+
+def current_theme() -> str:
+    return _current_theme
+
+
 def _rgba(value: str, alpha: float) -> str:
     c = QColor(value)
     return f"rgba({c.red()}, {c.green()}, {c.blue()}, {max(0.0, min(1.0, alpha)):.3f})"
 
 
 def build_stylesheet(panel_opacity: float = 1.0) -> str:
-    """QSS de l'application. `panel_opacity` < 1 laisse voir l'arrière-plan
-    (image personnalisée) à travers les colonnes et leurs blocs."""
-    return (STYLESHEET
+    """QSS de l'application, aux couleurs du thème en cours. `panel_opacity`
+    < 1 laisse voir l'arrière-plan (image personnalisée) à travers les
+    colonnes et leurs blocs."""
+    return (_stylesheet()
             .replace("@COLUMN_BG@", _rgba(BG_COLUMN, panel_opacity))
             .replace("@SECTION_BG@", _rgba(BG_SECTION, panel_opacity)))
 
 
-def set_panel_opacity(app: QApplication, panel_opacity: float) -> None:
+def refresh(app: QApplication, panel_opacity: float = 1.0) -> None:
+    """Ré-applique palette et QSS (après un changement de thème ou d'opacité)."""
+    _apply_palette(app)
     stylesheet = build_stylesheet(panel_opacity)
     if app.styleSheet() != stylesheet:   # re-styler toute l'app coûte : seulement si besoin
         app.setStyleSheet(stylesheet)
 
 
-def apply_theme(app: QApplication, panel_opacity: float = 1.0) -> None:
-    """Charge les polices et applique la palette + la QSS à toute l'application."""
+def set_panel_opacity(app: QApplication, panel_opacity: float) -> None:
+    refresh(app, panel_opacity)
+
+
+def apply_theme(app: QApplication, panel_opacity: float = 1.0, theme: str | None = None) -> None:
+    """Charge les polices et applique thème, palette et QSS à toute l'application."""
     load_fonts()
     app.setFont(font(11))
+    set_theme(theme)
+    _apply_palette(app)
+    app.setStyleSheet(build_stylesheet(panel_opacity))
 
+
+def _apply_palette(app: QApplication) -> None:
     palette = app.palette()
     for role, value in (
         (QPalette.ColorRole.Window, BG_WINDOW),
@@ -123,10 +210,10 @@ def apply_theme(app: QApplication, panel_opacity: float = 1.0) -> None:
     ):
         palette.setColor(role, QColor(value))
     app.setPalette(palette)
-    app.setStyleSheet(build_stylesheet(panel_opacity))
 
 
-STYLESHEET = f"""
+def _stylesheet() -> str:
+    return f"""
 * {{
     font-family: "{FONT_FAMILY}", "{FONT_FALLBACK}";
     outline: none;
@@ -325,7 +412,7 @@ QPushButton:disabled {{
 QPushButton#primary {{
     background: {GREEN_NEON};
     border: none;
-    color: #00140a;
+    color: {ON_ACCENT_DARK};
 }}
 QPushButton#primary:hover {{
     background: {GREEN_BRIGHT};

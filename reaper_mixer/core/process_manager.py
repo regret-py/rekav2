@@ -37,7 +37,7 @@ from typing import Callable, Iterator
 import psutil
 
 from core import config
-from core.voicemeeter_ctrl import edition, strip_channels
+from core.voicemeeter_ctrl import EDITIONS, edition, strip_channels
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -103,6 +103,22 @@ _VOICEMEETER_UNINSTALL_KEY = (
     r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
     r"\VB:Voicemeeter {17359A74-1236-5467}"
 )
+
+
+def running_voicemeeter_kind() -> str | None:
+    """Édition de Voicemeeter en cours d'exécution (basic, banana, potato), ou None."""
+    kinds = {exe.lower(): kind for kind, exes in _VOICEMEETER_EXES.items() for exe in exes}
+    for proc in psutil.process_iter(["name"]):
+        kind = kinds.get((proc.info.get("name") or "").lower())
+        if kind is not None:
+            return kind
+    return None
+
+
+def installed_voicemeeter_kinds(configured: str | None = None) -> list[str]:
+    """Éditions gérées par REKA (Potato, Banana) installées sur ce PC."""
+    return [kind for kind in EDITIONS
+            if find_executable(voicemeeter_spec(kind), configured) is not None]
 
 
 def voicemeeter_spec(kind: str) -> AppSpec:
@@ -179,6 +195,20 @@ class ProcessStartError(ProcessManagerError):
     pass
 
 
+class OtherEditionRunningError(ProcessManagerError):
+    """Une autre édition de Voicemeeter tourne déjà : REKA piloterait les
+    mauvaises strips (les index ne sont pas les mêmes d'une édition à l'autre)."""
+
+    def __init__(self, running_kind: str, wanted_kind: str) -> None:
+        running, wanted = running_kind.capitalize(), wanted_kind.capitalize()
+        super().__init__(f"Voicemeeter {running} est ouvert, mais REKA est réglé sur "
+                         f"Voicemeeter {wanted}.")
+        self.running_kind = running_kind
+        self.wanted_kind = wanted_kind
+        self.hint = (f"Ferme Voicemeeter {running} puis clique sur « Réessayer », "
+                     f"ou passe REKA sur {running}.")
+
+
 class StartupAborted(Exception):
     """Le démarrage a été interrompu (fermeture de l'app pendant le lancement)."""
 
@@ -195,8 +225,14 @@ def blank_project_path(cfg: dict) -> Path:
 
 
 def is_blank_project(path: str | Path) -> bool:
-    name = Path(path).name.lower()
-    return name.startswith("session") and name.endswith(".rpp")
+    """Projet vierge de REKA : session.rpp / session-<édition>.rpp de son
+    dossier de données (un projet perso nommé « session… » ailleurs n'en est pas un)."""
+    path = Path(path)
+    names = {SESSION_PROJECT_NAME} | {f"session-{kind}.rpp" for kind in EDITIONS}
+    if path.name.lower() not in names:
+        return False
+    return os.path.normcase(os.path.abspath(path.parent)) == \
+        os.path.normcase(os.path.abspath(config.app_data_dir()))
 
 
 def _rpp_string(text: str) -> str:
@@ -437,7 +473,12 @@ class ProcessManager:
 
     # ----------------------------------------------------------- API publique
     def start_voicemeeter(self) -> None:
-        kind = self._cfg.get("voicemeeter", {}).get("kind", "potato")
+        kind = edition(self._cfg).kind
+        current = self._get("voicemeeter")
+        if current is None or not current.is_alive():
+            running = running_voicemeeter_kind()
+            if running is not None and running != kind:
+                raise OtherEditionRunningError(running, kind)
         self._start(voicemeeter_spec(kind), args=[])
 
     def start_reaper(self, prepare: Callable[[Path], dict[str, str]] | None = None,

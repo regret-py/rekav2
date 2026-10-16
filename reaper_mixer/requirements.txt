@@ -12,4 +12,4 @@ psutil>=5.9
 pywin32>=306; sys_platform == "win32"
 
 # Build de l'exécutable
-pyinstaller>=6.3
+pyinstaller>=6.10   # PYINSTALLER_RESET_ENVIRONMENT (redémarrage)

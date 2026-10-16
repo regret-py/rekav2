@@ -12,6 +12,11 @@ Correspondance par défaut (config.json → voicemeeter.strip_maps / routing) :
     Potato : strips UI 0..5 → strips VM 0, 1, 5, 6, 2, 7
     Banana : strips UI 0..4 → strips VM 0, 1, 3, 4, 2 (5 entrées seulement)
     knobs Monitor / Mic Out / Discord / Obs → bus A1 / B1 / B2 / A2
+
+Intellipan (le carré avec le petit cube rouge) : entrées matérielles = modes
+Voix (Color_x/y), Position (Pan_x/y) et Effets (fx_x/y) ; entrées virtuelles =
+Position seulement (Pan 5.1). Plages de l'API Remote : x de -0,5 à +0,5,
+y de 0 à 1 (Pan des entrées virtuelles : -0,5 à +0,5).
 """
 
 from __future__ import annotations
@@ -86,7 +91,11 @@ def strip_map(cfg: dict) -> tuple[int, ...]:
     """Strips Voicemeeter affichées, dans l'ordre de l'UI, pour l'édition choisie
     (voicemeeter.strip_maps.<édition>) ; les index hors édition sont ignorés."""
     ed = edition(cfg)
-    custom = cfg.get("voicemeeter", {}).get("strip_maps", {}).get(ed.kind)
+    section = cfg.get("voicemeeter", {})
+    custom = section.get("strip_maps", {}).get(ed.kind)
+    legacy = section.get("strip_map")      # clé des versions 0.2 (Potato seulement)
+    if ed.kind == "potato" and legacy and tuple(custom or ()) in ((), ed.default_strip_map):
+        custom = legacy
     strips = tuple(int(s) for s in (custom or ed.default_strip_map))
     valid = tuple(s for s in strips if 0 <= s < ed.strip_count)
     if len(valid) != len(strips):
@@ -116,12 +125,55 @@ def _clamp_gain(db: float) -> float:
     return round(max(GAIN_MIN_DB, min(GAIN_MAX_DB, float(db))), 2)
 
 
+# --- Intellipan -------------------------------------------------------------
+@dataclass(frozen=True)
+class PadMode:
+    key: str          # nom court, stocké dans la config
+    label: str        # affiché sur le pad
+    title: str        # menu et info-bulle
+    param: str        # préfixe des paramètres : Color → Color_x / Color_y
+
+
+PAD_MODES = {
+    "color": PadMode("color", "VOIX", "Voix (couleur du son)", "Color"),
+    "pan": PadMode("pan", "POSITION", "Position (panoramique)", "Pan"),
+    "fx": PadMode("fx", "EFFETS", "Effets (écho, modulation)", "fx"),
+}
+PHYSICAL_PAD_MODES = ("color", "pan", "fx")
+VIRTUAL_PAD_MODES = ("pan",)
+PAD_X_RANGE = (-0.5, 0.5)
+
+
+def pad_modes(vm_strip: int, physical_strips: int = PHYSICAL_STRIPS) -> tuple[str, ...]:
+    """Modes d'Intellipan d'une strip Voicemeeter (Color et fx : entrées matérielles)."""
+    return PHYSICAL_PAD_MODES if vm_strip < physical_strips else VIRTUAL_PAD_MODES
+
+
+def pad_y_range(mode: str, physical: bool) -> tuple[float, float]:
+    """Plage de y : 0 → 1, sauf le Pan 5.1 des entrées virtuelles (-0,5 → +0,5)."""
+    return (-0.5, 0.5) if mode == "pan" and not physical else (0.0, 1.0)
+
+
+def clamp_pad(mode: str, physical: bool, x: float, y: float) -> tuple[float, float]:
+    low, high = pad_y_range(mode, physical)
+    return (round(max(PAD_X_RANGE[0], min(PAD_X_RANGE[1], float(x))), 3),
+            round(max(low, min(high, float(y))), 3))
+
+
 @dataclass(frozen=True)
 class StripParams:
     gain: float
     mute: bool
     routes: tuple[bool, ...]   # un booléen par knob de routing
     sends: tuple[float, ...]   # niveau (dB) de chaque knob de routing
+    # Intellipan : (mode, x, y) pour chaque mode de la strip
+    pads: tuple[tuple[str, float, float], ...] = ()
+
+    def pad(self, mode: str) -> tuple[float, float] | None:
+        for key, x, y in self.pads:
+            if key == mode:
+                return x, y
+        return None
 
 
 @dataclass(frozen=True)
@@ -133,7 +185,8 @@ class MixerParams:
         """Forme sauvegardée dans config.json (section « state »)."""
         return {
             "strips": [
-                {"gain": s.gain, "mute": s.mute, "routes": list(s.routes), "sends": list(s.sends)}
+                {"gain": s.gain, "mute": s.mute, "routes": list(s.routes), "sends": list(s.sends),
+                 "pads": {mode: [x, y] for mode, x, y in s.pads}}
                 for s in self.strips
             ],
             "headphone_db": self.headphone_gain,
@@ -206,6 +259,15 @@ class VoicemeeterController(QObject):
             with contextlib.suppress(Exception):
                 self._remote.logout()
             raise
+        running = None
+        with contextlib.suppress(Exception):
+            running = str(self._remote.type).lower()
+        if running in ("basic", "banana", "potato") and running != self._kind:
+            # Une autre édition tourne : ses strips n'ont pas les mêmes index
+            with contextlib.suppress(Exception):
+                self._remote.logout()
+            from core.process_manager import OtherEditionRunningError
+            raise OtherEditionRunningError(running, self._kind)
         self._logged_in = True
         log.info("Connecté à %s (version %s).", self._remote, self._remote.version)
 
@@ -287,6 +349,21 @@ class VoicemeeterController(QObject):
     def set_headphone_gain(self, db: float) -> None:
         self._queue(f"Bus[{self._headphone_bus}].Gain", _clamp_gain(db))
 
+    def pad_modes(self, strip: int) -> tuple[str, ...]:
+        return pad_modes(self._strips[strip], self._edition.physical_strips)
+
+    def is_physical(self, strip: int) -> bool:
+        return self._strips[strip] < self._edition.physical_strips
+
+    def set_pad(self, strip: int, mode: str, x: float, y: float) -> None:
+        """Position du petit cube de l'Intellipan (mode : color, pan ou fx)."""
+        if mode not in self.pad_modes(strip):
+            return
+        x, y = clamp_pad(mode, self.is_physical(strip), x, y)
+        prefix = f"Strip[{self._strips[strip]}].{PAD_MODES[mode].param}"
+        self._queue(f"{prefix}_x", x)
+        self._queue(f"{prefix}_y", y)
+
     def set_inserts(self, strips: Iterable[int]) -> None:
         """Active l'insert Voicemeeter des strips données (leur son passe alors
         par REAPER, donc par les effets) et rend les autres à leur état d'origine."""
@@ -304,6 +381,11 @@ class VoicemeeterController(QObject):
                 self.set_route(index, route, bool(enabled))
             for route, db in enumerate(strip.get("sends", [])[: len(self._route_buses)]):
                 self.set_send(index, route, db)
+            pads = strip.get("pads")
+            if isinstance(pads, dict):
+                for mode, xy in pads.items():
+                    if isinstance(xy, (list, tuple)) and len(xy) == 2:
+                        self.set_pad(index, mode, xy[0], xy[1])
         if "headphone_db" in state:
             self.set_headphone_gain(state["headphone_db"])
 
@@ -368,6 +450,7 @@ class VoicemeeterController(QObject):
         strips = []
         for vm_strip in self._strips:
             prefix = f"Strip[{vm_strip}]"
+            modes = pad_modes(vm_strip, self._edition.physical_strips)
             strips.append(StripParams(
                 gain=round(self._get(f"{prefix}.Gain"), 2),
                 mute=self._get(f"{prefix}.Mute") >= 0.5,
@@ -375,6 +458,9 @@ class VoicemeeterController(QObject):
                 sends=tuple(round(self._get(f"{prefix}.GainLayer[{bus}]"), 2)
                             if self.supports_sends else 0.0
                             for bus in self._route_buses),
+                pads=tuple((mode, round(self._get(f"{prefix}.{PAD_MODES[mode].param}_x"), 3),
+                            round(self._get(f"{prefix}.{PAD_MODES[mode].param}_y"), 3))
+                           for mode in modes),
             ))
         params = MixerParams(
             strips=tuple(strips),

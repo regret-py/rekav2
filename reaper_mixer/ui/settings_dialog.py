@@ -3,7 +3,8 @@ Réglages de REKA, en onglets :
   - Général    : projet REAPER, édition de Voicemeeter (Potato / Banana),
                  chemins des moteurs
   - Audio      : carte son de REAPER, affichage des moteurs, options
-  - Apparence  : image d'arrière-plan, transparence des panneaux, fenêtre
+  - Apparence  : thème de couleur, image d'arrière-plan, transparence des
+                 panneaux, fenêtre
   - À propos   : version, développeurs, journaux
 
 Les options s'appliquent tout de suite ; tout est écrit dans la config à la
@@ -16,15 +17,17 @@ import logging
 import shutil
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QPixmap
-from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QDialog, QFileDialog, QFormLayout,
-                               QGroupBox, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-                               QRadioButton, QSlider, QTabWidget, QVBoxLayout, QWidget)
+from PySide6.QtCore import QPointF, Qt, QUrl, Signal
+from PySide6.QtGui import QColor, QConicalGradient, QDesktopServices, QPainter, QPen, QPixmap
+from PySide6.QtWidgets import (QAbstractButton, QButtonGroup, QCheckBox, QColorDialog, QDialog,
+                               QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
+                               QLineEdit, QPushButton, QRadioButton, QSlider, QTabWidget,
+                               QVBoxLayout, QWidget)
 
 from core import config
 from core.process_manager import is_blank_project
 from core.voicemeeter_ctrl import EDITIONS, edition, strip_map
+from ui import styles
 from ui.project_dialog import default_project
 
 log = logging.getLogger(__name__)
@@ -39,6 +42,53 @@ def project_label(path: str) -> str:
     if is_blank_project(path):
         return f"Projet vierge REKA — {path}"
     return f"{Path(path).stem} — {path}"
+
+
+class Swatch(QAbstractButton):
+    """Pastille de couleur d'un thème ; « custom » = dégradé arc-en-ciel."""
+
+    SIZE = 30
+
+    def __init__(self, theme: str, color: str | None, tooltip: str,
+                 parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.theme = theme
+        self.color = color
+        self.setCheckable(True)
+        self.setFixedSize(self.SIZE, self.SIZE)
+        self.setToolTip(tooltip)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        center = QPointF(self.width() / 2, self.height() / 2)
+        selected = self.isChecked() or (self.theme == "custom" and self.color is not None)
+        if selected:
+            p.setPen(QPen(QColor(styles.TEXT_PRIMARY), 2))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(center, self.SIZE / 2 - 1.5, self.SIZE / 2 - 1.5)
+        radius = self.SIZE / 2 - 5.5 if selected else self.SIZE / 2 - 3
+        if self.underMouse() and not selected:
+            radius += 1
+        if self.color is not None:
+            p.setBrush(QColor(self.color))
+        else:
+            rainbow = QConicalGradient(center, 90)
+            for stop, hue in ((0.0, 0), (0.17, 60), (0.33, 120), (0.5, 180), (0.67, 240),
+                              (0.83, 300), (1.0, 359)):
+                rainbow.setColorAt(stop, QColor.fromHsv(hue, 200, 255))
+            p.setBrush(rainbow)
+        p.setPen(QPen(QColor(0, 0, 0, 120), 1))
+        p.drawEllipse(center, radius, radius)
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self.update()
+        super().leaveEvent(event)
 
 
 def _hint(text: str) -> QLabel:
@@ -86,7 +136,8 @@ class SettingsDialog(QDialog):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._tab(self._project_group(), self._engines_group()), "Général")
         self.tabs.addTab(self._tab(self._reaper_group(), self._options_group()), "Audio")
-        self.tabs.addTab(self._tab(self._background_group(), self._window_group()), "Apparence")
+        self.tabs.addTab(self._tab(self._theme_group(), self._background_group(),
+                                   self._window_group()), "Apparence")
         self.tabs.addTab(self._about_tab(), "À propos")
         layout.addWidget(self.tabs, 1)
 
@@ -224,6 +275,30 @@ class SettingsDialog(QDialog):
         return group
 
     # ---------------------------------------------------------- Apparence
+    def _theme_group(self) -> QGroupBox:
+        group = QGroupBox("Thème de couleur")
+        box = QVBoxLayout(group)
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        self.theme_group = QButtonGroup(self)
+        self.theme_swatches: dict[str, Swatch] = {}
+        for key, (name, accent) in styles.THEMES.items():
+            swatch = Swatch(key, accent, name)
+            self.theme_group.addButton(swatch)
+            self.theme_swatches[key] = swatch
+            row.addWidget(swatch)
+        self.custom_swatch = Swatch("custom", None, "Couleur personnalisée…")
+        self.custom_swatch.setCheckable(False)
+        self.custom_swatch.clicked.connect(self._choose_custom_theme)
+        row.addWidget(self.custom_swatch)
+        row.addStretch(1)
+        box.addLayout(row)
+        self.theme_label = _hint("")
+        box.addWidget(self.theme_label)
+        self.theme_group.buttonClicked.connect(lambda button: self.set_theme(button.theme))
+        self._show_theme()
+        return group
+
     def _background_group(self) -> QGroupBox:
         group = QGroupBox("Arrière-plan")
         box = QVBoxLayout(group)
@@ -363,6 +438,34 @@ class SettingsDialog(QDialog):
                 "Ferme l'autre édition de Voicemeeter si elle tourne encore.")
         else:
             self.edition_hint.setText(f"{chosen.label} : {len(strip_map(self._cfg))} strips.")
+
+    def set_theme(self, theme: str) -> None:
+        """Thème choisi (clé de styles.THEMES ou « #rrggbb »), appliqué tout de suite."""
+        if styles.theme_accent(theme) is None:
+            return
+        self._set_ui("theme", theme)
+        self._show_theme()
+
+    def _choose_custom_theme(self) -> None:
+        current = styles.theme_accent(self._cfg.get("ui", {}).get("theme")) or QColor(styles.GREEN_NEON)
+        color = QColorDialog.getColor(current, self, "Couleur du thème")
+        if color.isValid():
+            self.set_theme(color.name())
+
+    def _show_theme(self) -> None:
+        theme = self._cfg.get("ui", {}).get("theme", styles.DEFAULT_THEME)
+        if theme in styles.THEMES:
+            self.theme_swatches[theme].setChecked(True)
+            self.custom_swatch.color = None
+            self.theme_label.setText(f"Thème : {styles.THEMES[theme][0]}")
+        else:
+            self.theme_group.setExclusive(False)
+            for swatch in self.theme_swatches.values():
+                swatch.setChecked(False)
+            self.theme_group.setExclusive(True)
+            self.custom_swatch.color = theme if styles.theme_accent(theme) else None
+            self.theme_label.setText(f"Thème : couleur personnalisée {theme}")
+        self.custom_swatch.update()
 
     def _choose_background(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Choisir une image d'arrière-plan",

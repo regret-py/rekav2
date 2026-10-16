@@ -18,7 +18,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 
 from core.reaper_ctrl import AudioDevice, FxInfo, TrackInfo
 from core.voicemeeter_ctrl import (DEFAULT_ROUTING, SILENCE_DB, MixerLevels, MixerParams,
-                                   StripParams, edition, strip_map)
+                                   StripParams, clamp_pad, edition, pad_modes, strip_map)
 
 DEMO_FX = {
     0: ["VST3: Pro-G (FabFilter)", "VST3: Pro-Q 4 (FabFilter)", "VST3: Pro-C 3 (FabFilter)",
@@ -39,15 +39,19 @@ class DemoVoicemeeter(QObject):
 
     def __init__(self, cfg: dict, parent: QObject | None = None) -> None:
         super().__init__(parent)
-        count = len(strip_map(cfg))
+        self._vm_strips = strip_map(cfg)
         routes = len(cfg.get("voicemeeter", {}).get("routing", DEFAULT_ROUTING))
         self.edition = edition(cfg)
         self.supports_sends = self.edition.gain_layers
-        # Comme la maquette : micro coupé avec tous les envois, le reste vers le casque
+        # Comme la maquette : micro coupé avec tous les envois, le reste vers le casque.
+        # Intellipan : un peu de « couleur » sur le micro pour montrer le petit cube.
         self._strips = [
             StripParams(0.0, index == 0, tuple(index == 0 or r == 0 for r in range(routes)),
-                        tuple(0.0 if index == 0 or r == 0 else -18.0 for r in range(routes)))
-            for index in range(count)
+                        tuple(0.0 if index == 0 or r == 0 else -18.0 for r in range(routes)),
+                        tuple((mode, 0.18 if index == 0 and mode == "color" else 0.0,
+                               0.62 if index == 0 and mode == "color" else 0.0)
+                              for mode in pad_modes(vm, self.edition.physical_strips)))
+            for index, vm in enumerate(self._vm_strips)
         ]
         self._headphone = 0.0
         self.inserts: set[int] = set()
@@ -93,6 +97,20 @@ class DemoVoicemeeter(QObject):
 
     def set_label(self, strip: int, text: str) -> None:
         pass
+
+    def pad_modes(self, strip: int) -> tuple[str, ...]:
+        return pad_modes(self._vm_strips[strip], self.edition.physical_strips)
+
+    def is_physical(self, strip: int) -> bool:
+        return self._vm_strips[strip] < self.edition.physical_strips
+
+    def set_pad(self, strip: int, mode: str, x: float, y: float) -> None:
+        if mode not in self.pad_modes(strip):
+            return
+        x, y = clamp_pad(mode, self.is_physical(strip), x, y)
+        pads = tuple((key, x, y) if key == mode else (key, px, py)
+                     for key, px, py in self._strips[strip].pads)
+        self._update(strip, pads=pads)
 
     def set_headphone_gain(self, db: float) -> None:
         self._headphone = db
