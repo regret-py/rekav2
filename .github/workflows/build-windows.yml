@@ -1,0 +1,94 @@
+# Construit « REAPER Mixer.exe » sur une machine Windows de GitHub à chaque push,
+# après les tests, et le publie dans une release téléchargeable.
+name: Build Windows
+
+on:
+  push:
+    paths:
+      - "reaper_mixer/**"
+      - ".github/workflows/build-windows.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests-linux:
+    name: Tests (Linux, pont Lua inclus)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: reaper_mixer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Dépendances système (Qt hors écran, Lua 5.4)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq lua5.4 libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3
+      - name: Dépendances Python
+        run: python -m pip install -r requirements.txt pytest
+      - name: Tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q tests
+
+  build-windows:
+    name: Tests + build de l'exe (Windows)
+    needs: tests-linux
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: reaper_mixer
+        shell: bash
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Dépendances Python
+        run: python -m pip install -r requirements.txt pytest
+      - name: Tests (dont masquage de fenêtres Win32)
+        run: python -m pytest -q tests
+      - name: Build PyInstaller
+        run: python -m PyInstaller --noconfirm --clean build.spec
+      - name: Auto-test de l'exe (rendu de la console en mode démo)
+        env:
+          APPDATA: ${{ runner.temp }}/appdata
+        run: |
+          mkdir -p selftest
+          "./dist/REAPER Mixer.exe" --selftest "$(pwd -W)/selftest/console.png"
+          cat selftest/console.txt
+          grep -q "RÉSULTAT : OK" selftest/console.txt
+          ls -la dist selftest
+      - name: Artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: REAPER-Mixer
+          path: |
+            reaper_mixer/dist/REAPER Mixer.exe
+            reaper_mixer/selftest/
+      - name: Release « build-<branche> »
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="build-${GITHUB_REF_NAME//\//-}"
+          cp "dist/REAPER Mixer.exe" dist/REAPER-Mixer.exe
+          gh release delete "$tag" --yes --cleanup-tag || true
+          gh release create "$tag" dist/REAPER-Mixer.exe selftest/console.png \
+            --prerelease --target "$GITHUB_SHA" \
+            --title "REAPER Mixer — dernier build ($GITHUB_REF_NAME)" \
+            --notes "Exécutable Windows construit automatiquement depuis $GITHUB_SHA.
+
+          Télécharge **REAPER-Mixer.exe** et lance-le. Il faut Voicemeeter Potato et REAPER installés.
+          Pour voir la console sans eux : \`REAPER-Mixer.exe --demo\`.
+          console.png : rendu de l'auto-test fait par ce build."

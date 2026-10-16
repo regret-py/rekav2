@@ -4,4 +4,6 @@ __pycache__/
 venv/
 build/
 dist/
+selftest/
+.pytest_cache/
 *.log
