@@ -74,14 +74,17 @@ def test_startup_hook_keeps_user_script(tmp_path):
 
     scripts = tmp_path / "Scripts"
     scripts.mkdir()
-    (scripts / "__startup.lua").write_text("-- perso\nreaper.ShowConsoleMsg('hi')\n")
+    # Script perso en cp1252 (« é » = 0xE9) : ses octets doivent être conservés tels quels
+    user_script = "-- perso été\nreaper.ShowConsoleMsg('hi')\n".encode("cp1252")
+    (scripts / "__startup.lua").write_bytes(user_script)
     path = install_startup_hook(tmp_path)
-    content = path.read_text()
-    assert content.startswith(STARTUP_BEGIN) and content.count(STARTUP_BEGIN) == 1
-    assert content.rstrip().endswith("reaper.ShowConsoleMsg('hi')")
+    content = path.read_bytes()
+    assert content.startswith(STARTUP_BEGIN.encode()) and content.count(STARTUP_BEGIN.encode()) == 1
+    assert content.endswith(user_script)
     install_startup_hook(tmp_path)
-    assert path.read_text() == content
-    assert remove_startup_block(content).strip() == "-- perso\nreaper.ShowConsoleMsg('hi')"
+    assert path.read_bytes() == content
+    text = content.decode("utf-8", errors="surrogateescape")
+    assert remove_startup_block(text).encode("utf-8", errors="surrogateescape") == user_script
 
 
 def test_resource_path_detection(tmp_path, appdata):

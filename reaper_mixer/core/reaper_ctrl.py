@@ -38,7 +38,8 @@ log = logging.getLogger(__name__)
 
 BRIDGE_FILENAME = "reaper_mixer_bridge.lua"
 IPC_ENV = "REAPER_MIXER_IPC"
-STARTUP_BEGIN = "-- >>> REAPER Mixer (bloc géré automatiquement, ne pas modifier)"
+# ASCII uniquement : le fichier de l'utilisateur peut être dans n'importe quel encodage
+STARTUP_BEGIN = "-- >>> REAPER Mixer (bloc gere automatiquement, ne pas modifier)"
 STARTUP_END = "-- <<< REAPER Mixer"
 POLL_INTERVAL_S = 0.05
 HEARTBEAT_TIMEOUT_S = 3.0
@@ -474,12 +475,15 @@ def install_startup_hook(resource_path: Path) -> Path:
     scripts = resource_path / "Scripts"
     scripts.mkdir(parents=True, exist_ok=True)
     path = scripts / "__startup.lua"
-    current = path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
+    # surrogateescape : les octets du script de l'utilisateur sont réécrits à
+    # l'identique, quel que soit son encodage
+    current = (path.read_bytes().decode("utf-8", errors="surrogateescape")
+               if path.is_file() else "")
     cleaned = remove_startup_block(current)
     block = startup_block()
     new = (block + "\n" + cleaned.lstrip("\n")) if cleaned.strip() else block
     if new != current:
-        path.write_text(new, encoding="utf-8", newline="\n")
+        path.write_bytes(new.encode("utf-8", errors="surrogateescape"))
         log.info("Chargement du pont ajouté à %s", path)
     return path
 
