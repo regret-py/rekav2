@@ -255,6 +255,21 @@ def test_edition_choice_needs_restart(qapp, mixer):
     assert restarts == [True]
     dialog.done(0)
 
+    # Depuis la console : les réglages se ferment, puis REKA redémarre (en démo : un message)
+    window._cfg["voicemeeter"]["kind"] = "potato"
+
+    def choose_banana():
+        settings = QApplication.activeModalWidget()
+        assert settings is not None and settings.isVisible()
+        next(b for b in settings.edition_group.buttons() if b.property("kind") == "banana").click()
+        settings.restart_button.click()
+
+    QTimer.singleShot(150, choose_banana)
+    window.open_settings()
+    pump(qapp, 0.05)
+    assert QApplication.activeModalWidget() is None and window.isVisible()
+    assert window.toast.text() == "Mode démo : pas de redémarrage."
+
 
 def test_banana_console(qapp, cfg):
     from core.demo import DemoProcesses, DemoReaper, DemoVoicemeeter

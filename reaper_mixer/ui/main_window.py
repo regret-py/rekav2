@@ -343,8 +343,14 @@ class MainWindow(QMainWindow):
         dialog.projectRequested.connect(self.choose_project)
         dialog.appearanceChanged.connect(self.apply_appearance)
         dialog.windowResetRequested.connect(self.reset_window_size)
-        dialog.restartRequested.connect(self.restart_app)
+        # Redémarrage après la fermeture des réglages (pas depuis leur boucle modale)
+        restart = []
+        dialog.restartRequested.connect(lambda: restart.append(True))
+        dialog.restartRequested.connect(dialog.accept)
         dialog.exec()
+        dialog.deleteLater()
+        if restart:
+            self.restart_app()
 
     # ------------------------------------------------------------ apparence
     def apply_appearance(self) -> None:
