@@ -1,0 +1,30 @@
+<REAPER_PROJECT 0.1 "7.0/win64" 1729000000
+  RIPPLE 0
+  MASTER_NCH 2 2
+  MASTER_VOLUME 1 0 -1 -1 1
+  MASTERMUTESOLO 0
+  <TRACK
+    NAME Microphone
+    MAINSEND 0 0
+  >
+  <TRACK
+    NAME Musique
+    MAINSEND 0 0
+  >
+  <TRACK
+    NAME Appels
+    MAINSEND 0 0
+  >
+  <TRACK
+    NAME Bureau
+    MAINSEND 0 0
+  >
+  <TRACK
+    NAME "Autres 1"
+    MAINSEND 0 0
+  >
+  <TRACK
+    NAME "Autres 2"
+    MAINSEND 0 0
+  >
+>

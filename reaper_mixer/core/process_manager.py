@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -31,7 +32,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 import psutil
 
@@ -58,8 +59,9 @@ if IS_WINDOWS:
 
 log = logging.getLogger(__name__)
 
-POLL_INTERVAL_S = 0.1          # scrutation des fenêtres pendant un lancement
-WATCHDOG_INTERVAL_S = 0.5      # période du chien de garde (re-masquage, crash)
+POLL_INTERVAL_S = 0.05         # scrutation des fenêtres pendant un lancement
+SETTLE_S = 3.0                 # re-masquage rapide juste après l'apparition
+WATCHDOG_INTERVAL_S = 0.25     # période du chien de garde (re-masquage, crash)
 KILL_WAIT_S = 3.0              # attente après un arrêt forcé
 DEFAULT_WINDOW_TIMEOUT_S = 30.0
 DEFAULT_CLOSE_TIMEOUT_S = 8.0
@@ -358,10 +360,40 @@ class ProcessManager:
         kind = self._cfg.get("voicemeeter", {}).get("kind", "potato")
         self._start(voicemeeter_spec(kind), args=[])
 
-    def start_reaper(self) -> None:
+    def start_reaper(self, prepare: Callable[[Path], dict[str, str]] | None = None) -> None:
+        """Lance REAPER sur le projet de session.
+
+        `prepare(exe)` est appelé avant le lancement avec le chemin de reaper.exe
+        (installation du pont Lua) et renvoie des variables d'environnement à
+        transmettre au processus."""
         project = self._prepare_reaper_project()
         args = ["-nosplash"] + ([str(project)] if project else [])
-        self._start(REAPER_SPEC, args=args)
+        self._start(REAPER_SPEC, args=args, prepare=prepare)
+
+    def executable(self, key: str) -> Path | None:
+        """Chemin de l'exécutable connu pour un moteur (après un start_*)."""
+        path = config.resolve_path(self._section(key).get("path"))
+        return path if path is not None and path.is_file() else None
+
+    def focus_window(self, key: str, title_contains: str) -> bool:
+        """Met au premier plan une fenêtre secondaire visible d'un moteur dont le
+        titre contient `title_contains` (ex. l'interface d'un plugin VST, qui
+        s'ouvrirait sinon derrière la console)."""
+        managed = self._get(key)
+        if not IS_WINDOWS or managed is None or not managed.is_alive():
+            return False
+        needle = title_contains.lower()
+        mains = set(managed.main_windows())
+        for hwnd in _top_level_windows({managed.pid}).get(managed.pid, []):
+            try:
+                if (hwnd in mains or not win32gui.IsWindowVisible(hwnd)
+                        or needle not in win32gui.GetWindowText(hwnd).lower()):
+                    continue
+                win32gui.SetForegroundWindow(hwnd)
+                return True
+            except pywintypes.error as exc:
+                log.debug("Mise au premier plan impossible : %s", exc)
+        return False
 
     def abort_startup(self) -> None:
         """Interrompt un start_* en cours (lève StartupAborted dans son thread)."""
@@ -392,6 +424,22 @@ class ProcessManager:
             _set_windows_visible(managed.main_windows(), visible)
         log.info("%s : fenêtre %s.", managed.spec.name, "affichée" if visible else "masquée")
 
+    def stop(self, key: str) -> None:
+        """Arrête un moteur s'il est à nous (et terminate_on_exit), sinon le
+        laisse tourner et ré-affiche sa fenêtre."""
+        managed = self._get(key)
+        if managed is None or not managed.is_alive():
+            return
+        if self.will_terminate(key):
+            self._terminate(managed)
+        else:
+            managed.keep_hidden = False
+            if IS_WINDOWS:
+                _set_windows_visible(managed.main_windows(), True)
+            log.info("%s laissé ouvert (PID %d), fenêtre ré-affichée.",
+                     managed.spec.name, managed.pid)
+        self._save_state()
+
     def shutdown(self) -> None:
         """Arrête ce qu'on a lancé, ré-affiche ce qu'on a emprunté."""
         self._abort.set()
@@ -400,25 +448,17 @@ class ProcessManager:
             self._watchdog.join(timeout=2.0)
 
         with self._lock:
-            procs = list(self._procs.values())
-        # Ordre inverse du lancement : REAPER d'abord, Voicemeeter ensuite
-        for managed in reversed(procs):
-            if not managed.is_alive():
-                continue
-            if self.will_terminate(managed.spec.key):
-                self._terminate(managed)
-            else:
-                managed.keep_hidden = False
-                if IS_WINDOWS:
-                    _set_windows_visible(managed.main_windows(), True)
-                log.info("%s laissé ouvert (PID %d), fenêtre ré-affichée.",
-                         managed.spec.name, managed.pid)
-        # Ne restent dans l'état que nos processus encore vivants
+            keys = list(self._procs)
+        # Ordre inverse du lancement : REAPER d'abord, Voicemeeter ensuite.
+        # Ne restent ensuite dans processes.json que nos processus encore vivants
         # (terminate_on_exit = false) : ils seront repris au prochain lancement.
+        for key in reversed(keys):
+            self.stop(key)
         self._save_state()
 
     # -------------------------------------------------------------- lancement
-    def _start(self, spec: AppSpec, args: list[str]) -> None:
+    def _start(self, spec: AppSpec, args: list[str],
+               prepare: Callable[[Path], dict[str, str]] | None = None) -> None:
         if self._abort.is_set():
             raise StartupAborted()
         current = self._get(spec.key)
@@ -430,8 +470,9 @@ class ProcessManager:
         if exe is None:
             raise AppNotInstalledError(spec)
         section["path"] = str(exe)  # mémorisé : plus de recherche au prochain lancement
+        env = prepare(exe) if prepare is not None else {}
 
-        managed = self._adopt_running(spec) or self._launch(spec, exe, args)
+        managed = self._adopt_running(spec) or self._launch(spec, exe, args, env)
         with self._lock:
             self._procs[spec.key] = managed
         self._save_state()
@@ -460,24 +501,22 @@ class ProcessManager:
                  "il sera ré-affiché à la fermeture.", spec.name, proc.pid)
         return ManagedProcess(spec, proc, launched_by_us=False)
 
-    def _launch(self, spec: AppSpec, exe: Path, args: list[str]) -> ManagedProcess:
+    def _launch(self, spec: AppSpec, exe: Path, args: list[str],
+                env: dict[str, str]) -> ManagedProcess:
         cmd = [str(exe), *args]
         log.info("Lancement de %s : %s", spec.name, subprocess.list2cmdline(cmd))
+        # Pas de STARTUPINFO « masqué » : Windows l'appliquerait à la toute
+        # première fenêtre affichée, qui peut être une boîte de licence que
+        # l'utilisateur doit voir. Le masquage se fait par scrutation.
         kwargs: dict = {
             "cwd": str(exe.parent),
+            "env": {**os.environ, **env},
             # Flux explicites : en mode --windowed, PyInstaller n'a pas de
             # stdin/stdout valides à transmettre au processus enfant.
             "stdin": subprocess.DEVNULL,
             "stdout": subprocess.DEVNULL,
             "stderr": subprocess.DEVNULL,
         }
-        if IS_WINDOWS:
-            # Demande au processus de démarrer masqué (respecté par la plupart
-            # des applis au premier affichage) : évite un flash à l'écran.
-            startup = subprocess.STARTUPINFO()
-            startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            startup.wShowWindow = subprocess.SW_HIDE
-            kwargs["startupinfo"] = startup
         try:
             popen = subprocess.Popen(cmd, **kwargs)
             proc = psutil.Process(popen.pid)
@@ -486,23 +525,31 @@ class ProcessManager:
         return ManagedProcess(spec, proc, launched_by_us=True, popen=popen)
 
     def _hide_when_ready(self, managed: ManagedProcess, timeout_s: float) -> None:
-        """Attend l'apparition de la fenêtre principale puis la masque."""
+        """Attend l'apparition de la fenêtre principale puis la masque.
+
+        Une appli crée souvent sa fenêtre cachée puis l'affiche un peu plus
+        tard : on continue donc à la re-masquer rapidement pendant SETTLE_S,
+        le chien de garde prenant ensuite le relais."""
         if not IS_WINDOWS:
             return
         name = managed.spec.name
         deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
+        settle_until: float | None = None
+        while time.monotonic() < (settle_until or deadline):
             if not managed.is_alive():
                 raise ProcessStartError(f"{name} s'est fermé juste après son lancement.")
             windows = managed.main_windows()
             if windows:
                 if managed.keep_hidden:
                     _set_windows_visible(windows, False)
-                log.info("%s prêt (PID %d), fenêtre principale masquée.", name, managed.pid)
-                return
+                if settle_until is None:
+                    log.info("%s prêt (PID %d), fenêtre principale masquée.", name, managed.pid)
+                    settle_until = time.monotonic() + SETTLE_S
             if self._abort.wait(POLL_INTERVAL_S):
                 raise StartupAborted()
-        # Pas bloquant : la vraie vérification est la connexion API/OSC qui suit,
+        if settle_until is not None:
+            return
+        # Pas bloquant : la vraie vérification est la connexion (API / pont) qui suit,
         # et le chien de garde masquera la fenêtre dès qu'elle apparaîtra.
         log.warning("%s : fenêtre principale introuvable après %.0f s.", name, timeout_s)
 
@@ -645,7 +692,7 @@ if __name__ == "__main__":
     manager = ProcessManager(config.load_config())
     try:
         manager.start_voicemeeter()
-        manager.start_reaper()
+        manager.start_reaper()  # sans pont Lua : test du lancement seul
         input("\nVoicemeeter et REAPER tournent, masqués. [Entrée] pour les afficher… ")
         manager.set_window_visible("voicemeeter", True)
         manager.set_window_visible("reaper", True)

@@ -3,6 +3,16 @@
   "voicemeeter": {
     "path": "",
     "kind": "potato",
+    "strip_map": [0, 1, 5, 6, 2, 7],
+    "routing": [
+      {"label": "Monitor", "bus": "A1"},
+      {"label": "Mic Out", "bus": "B1"},
+      {"label": "Discord", "bus": "B2"},
+      {"label": "Obs", "bus": "A2"}
+    ],
+    "headphone_bus": "A1",
+    "poll_hz": 30,
+    "manage_insert": true,
     "window_timeout_s": 20,
     "login_timeout_s": 30,
     "login_retry_s": 5,
@@ -11,23 +21,22 @@
   },
   "reaper": {
     "path": "",
+    "resource_path": "",
     "template": "assets/reaper_template.rpp",
     "project": "",
-    "osc_host": "127.0.0.1",
-    "osc_send_port": 8000,
-    "osc_listen_port": 9000,
+    "manage_routing": true,
     "window_timeout_s": 60,
-    "osc_timeout_s": 30,
+    "bridge_timeout_s": 90,
     "close_timeout_s": 10,
     "terminate_on_exit": true
+  },
+  "vst": {
+    "extra_dirs": []
   },
   "ui": {
     "width": 1920,
     "height": 1040,
     "strip_names": ["Microphone", "Musique", "Appels", "Bureau", "Autres 1", "Autres 2"]
   },
-  "state": {
-    "faders_db": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-    "headphone_db": 0.0
-  }
+  "state": {}
 }

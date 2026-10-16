@@ -6,8 +6,7 @@
 PySide6-Essentials>=6.6,<7
 # Contrôle de Voicemeeter (API Remote) — s'importe sous le nom « voicemeeterlib »
 voicemeeter-api>=2.5,<3
-# Communication OSC avec REAPER
-python-osc>=1.8,<2
+# (REAPER est piloté par un pont Lua livré dans assets/ : pas de dépendance)
 # Processus, fenêtres et registre Windows
 psutil>=5.9
 pywin32>=306; sys_platform == "win32"
