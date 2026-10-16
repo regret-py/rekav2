@@ -28,7 +28,7 @@ class GearButton(QAbstractButton):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setFixedSize(26, 26)
+        self.setFixedSize(24, 24)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip("Réglages")
 
@@ -62,6 +62,37 @@ class GearButton(QAbstractButton):
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawPath(path)
         p.drawPath(hole)
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self.update()
+        super().leaveEvent(event)
+
+
+class MinimizeButton(QAbstractButton):
+    """Bouton carré « – » : réduit REKA (dans la barre des tâches ou la zone
+    de notification, selon les réglages)."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(24, 24)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Réduire REKA")
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        hover = self.underMouse()
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(styles.BUTTON_HOVER if hover else styles.BUTTON_BG))
+        p.drawRoundedRect(QRectF(0, 0, self.width(), self.height()), 7, 7)
+        p.setPen(QPen(QColor(styles.TEXT_PRIMARY if hover else styles.TEXT_SECONDARY), 1.8,
+                      Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        y = self.height() / 2 + 3
+        p.drawLine(QPointF(8, y), QPointF(self.width() - 8, y))
 
     def enterEvent(self, event) -> None:  # noqa: N802
         self.update()
@@ -179,6 +210,7 @@ class ProjectButton(QAbstractButton):
 class MasterWidget(QFrame):
     settingsRequested = Signal()
     projectRequested = Signal()
+    minimizeRequested = Signal()
     headphoneChanged = Signal(float)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -192,10 +224,14 @@ class MasterWidget(QFrame):
 
         header = QHBoxLayout()
         header.setContentsMargins(2, 0, 0, 0)
+        header.setSpacing(4)
         title = QLabel("Master")
         title.setObjectName("masterTitle")
         header.addWidget(title)
         header.addStretch(1)
+        self.minimize = MinimizeButton()
+        self.minimize.clicked.connect(self.minimizeRequested)
+        header.addWidget(self.minimize)
         self.gear = GearButton()
         self.gear.clicked.connect(self.settingsRequested)
         header.addWidget(self.gear)

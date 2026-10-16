@@ -37,6 +37,7 @@ from typing import Callable, Iterator
 import psutil
 
 from core import config
+from core.voicemeeter_ctrl import edition, strip_channels
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -185,19 +186,61 @@ class StartupAborted(Exception):
 # --------------------------------------------------------------------------- #
 # Projet REAPER
 # --------------------------------------------------------------------------- #
+def blank_project_path(cfg: dict) -> Path:
+    """Fichier du projet vierge de l'édition de Voicemeeter choisie (les canaux
+    d'insert ne sont pas les mêmes sur Potato et Banana)."""
+    kind = edition(cfg).kind
+    name = SESSION_PROJECT_NAME if kind == "potato" else f"session-{kind}.rpp"
+    return config.app_data_dir() / name
+
+
+def is_blank_project(path: str | Path) -> bool:
+    name = Path(path).name.lower()
+    return name.startswith("session") and name.endswith(".rpp")
+
+
+def _rpp_string(text: str) -> str:
+    """Chaîne au format .rpp : guillemets si besoin, avec le délimiteur libre."""
+    if text and not any(c.isspace() for c in text) and not any(q in text for q in "\"'`"):
+        return text
+    for quote in ('"', "'", "`"):
+        if quote not in text:
+            return f"{quote}{text}{quote}"
+    return '"' + text.replace('"', "'") + '"'
+
+
+def build_blank_project(names: list[str], channels: list[int]) -> str:
+    """Projet REAPER vierge : une piste par strip, entrée stéréo sur son canal
+    d'insert, écoute de l'entrée sans enregistrement, sortie sur la même paire,
+    pas d'envoi au master, aucun effet."""
+    lines = ['<REAPER_PROJECT 0.1 "7.0/win64" 0', "  RIPPLE 0", "  MASTER_NCH 2 2",
+             "  MASTER_VOLUME 1 0 -1 -1 1", "  MASTERMUTESOLO 0"]
+    for name, channel in zip(names, channels):
+        lines += ["  <TRACK", f"    NAME {_rpp_string(name)}",
+                  f"    REC 1 {1024 + channel} 1 2 0 0 0 0", "    MAINSEND 0 0",
+                  f"    HWOUT {channel} 0 1 0 0 0 0 -1:U -1", "  >"]
+    lines.append(">")
+    return "\n".join(lines) + "\n"
+
+
 def blank_project(cfg: dict) -> Path | None:
-    """Projet vierge de REKA (6 pistes câblées, aucun effet) : copié depuis le
-    template au premier besoin, puis réutilisé (ses effets sont conservés)."""
-    project = config.app_data_dir() / SESSION_PROJECT_NAME
+    """Projet vierge de REKA (une piste câblée par strip, aucun effet) : créé au
+    premier besoin, puis réutilisé (ses effets sont conservés). Un template
+    personnalisé (reaper.template) est copié à la place s'il est défini."""
+    project = blank_project_path(cfg)
     if project.is_file():
         return project
-    template = config.resolve_path(cfg.get("reaper", {}).get("template"))
-    if template is None or not template.is_file():
-        log.warning("Template REAPER introuvable (%s) : REAPER démarre sans projet.", template)
-        return None
     project.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(template, project)
-    log.info("Projet vierge créé depuis le template : %s", project)
+    template = config.resolve_path(cfg.get("reaper", {}).get("template"))
+    if template is not None and template.is_file():
+        shutil.copyfile(template, project)
+        log.info("Projet vierge créé depuis le template %s : %s", template, project)
+        return project
+    channels = strip_channels(cfg)
+    names = list(cfg.get("ui", {}).get("strip_names", []))
+    names += [f"Strip {i + 1}" for i in range(len(names), len(channels))]
+    project.write_text(build_blank_project(names[:len(channels)], channels), encoding="utf-8")
+    log.info("Projet vierge créé (%s) : %s", edition(cfg).label, project)
     return project
 
 
@@ -228,13 +271,18 @@ def find_executable(spec: AppSpec, configured: str | None = None) -> Path | None
 
 
 def _executable_candidates(spec: AppSpec, configured: str | None) -> Iterator[tuple[str, Path]]:
-    # 1. Chemin configuré : fichier exe, ou dossier qui le contient
+    # 1. Chemin configuré : fichier exe, ou dossier qui le contient. Un exe d'une
+    #    autre édition (Potato mémorisé, Banana choisie) donne le dossier
+    #    d'installation, où l'on cherche l'exe de l'édition voulue.
     path = config.resolve_path(configured)
     if path is not None:
+        wanted_names = {exe.lower() for exe in spec.exe_names}
         if path.is_dir():
             yield from (("config.json", path / exe) for exe in spec.exe_names)
-        else:
+        elif path.name.lower() in wanted_names:
             yield "config.json", path
+        else:
+            yield from (("config.json", path.parent / exe) for exe in spec.exe_names)
         log.warning("%s : chemin configuré invalide (%s), recherche automatique.",
                     spec.name, path)
 

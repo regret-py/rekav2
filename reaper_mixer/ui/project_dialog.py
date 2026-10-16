@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFileDialog
                                QWidget)
 
 from core import config
+from core.process_manager import blank_project_path
 
 MAX_RECENT = 8
 BLANK_LABEL = "Projet vierge REKA — aucun effet"
@@ -137,7 +138,7 @@ class ProjectDialog(QDialog):
 
     def _matches(self, path: str, other: str) -> bool:
         """"" (projet vierge) correspond aussi au fichier du projet vierge."""
-        blank = str(config.app_data_dir() / "session.rpp")
+        blank = str(blank_project_path(self._cfg))
         a = path or blank
         b = other or blank
         return _same(a, b)

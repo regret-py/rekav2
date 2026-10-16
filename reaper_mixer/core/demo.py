@@ -18,7 +18,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 
 from core.reaper_ctrl import AudioDevice, FxInfo, TrackInfo
 from core.voicemeeter_ctrl import (DEFAULT_ROUTING, SILENCE_DB, MixerLevels, MixerParams,
-                                   StripParams)
+                                   StripParams, edition, strip_map)
 
 DEMO_FX = {
     0: ["VST3: Pro-G (FabFilter)", "VST3: Pro-Q 4 (FabFilter)", "VST3: Pro-C 3 (FabFilter)",
@@ -39,8 +39,10 @@ class DemoVoicemeeter(QObject):
 
     def __init__(self, cfg: dict, parent: QObject | None = None) -> None:
         super().__init__(parent)
-        count = len(cfg.get("voicemeeter", {}).get("strip_map", [0] * 6))
+        count = len(strip_map(cfg))
         routes = len(cfg.get("voicemeeter", {}).get("routing", DEFAULT_ROUTING))
+        self.edition = edition(cfg)
+        self.supports_sends = self.edition.gain_layers
         # Comme la maquette : micro coupé avec tous les envois, le reste vers le casque
         self._strips = [
             StripParams(0.0, index == 0, tuple(index == 0 or r == 0 for r in range(routes)),
@@ -83,6 +85,8 @@ class DemoVoicemeeter(QObject):
         self._update(strip, routes=tuple(routes))
 
     def set_send(self, strip: int, route: int, db: float) -> None:
+        if not self.supports_sends:
+            return  # Banana : pas de niveaux d'envoi, comme le vrai contrôleur
         sends = list(self._strips[strip].sends)
         sends[route] = db
         self._update(strip, sends=tuple(sends))
@@ -134,7 +138,7 @@ class DemoReaper(QObject):
     def __init__(self, cfg: dict, parent: QObject | None = None) -> None:
         super().__init__(parent)
         names = cfg.get("ui", {}).get("strip_names", [])
-        count = len(cfg.get("voicemeeter", {}).get("strip_map", [0] * 6))
+        count = len(strip_map(cfg))
         self._tracks = [
             TrackInfo(names[i] if i < len(names) else f"Strip {i + 1}", i != 0,
                       tuple(FxInfo(n, True, False) for n in DEMO_FX.get(i, [])), index=i)

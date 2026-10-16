@@ -2,9 +2,11 @@
 
 # REKA
 
-Console de mixage unique pour Windows : elle pilote **Voicemeeter Potato** (routing,
-volumes, mutes, VU-mètres) et **REAPER** (effets VST par strip), qui tournent tous les
-deux cachés en arrière-plan. L'utilisateur ne voit que la console.
+Console de mixage unique pour Windows : elle pilote **Voicemeeter Potato ou Banana**
+(routing, volumes, mutes, VU-mètres) et **REAPER** (effets VST par strip), qui tournent
+tous les deux cachés en arrière-plan. L'utilisateur ne voit que la console.
+
+Développé par **Regrettable** et **Zerka**.
 
 ![console](https://github.com/regret-py/rekav2/releases/download/build-claude-charming-hawking-bll4o5/console.png)
 
@@ -17,7 +19,8 @@ Chaque push construit automatiquement `REKA.exe` sur une machine Windows de GitH
 ## Prérequis
 
 - Windows 10/11 64 bits
-- [Voicemeeter Potato](https://vb-audio.com/Voicemeeter/potato.htm)
+- [Voicemeeter Potato](https://vb-audio.com/Voicemeeter/potato.htm) ou
+  [Voicemeeter Banana](https://vb-audio.com/Voicemeeter/banana.htm)
 - [REAPER](https://www.reaper.fm/download.php) (6.37 ou plus récent conseillé)
 
 Si l'un des deux manque, l'app affiche un lien de téléchargement, ou permet de
@@ -40,7 +43,7 @@ passe sans effets plutôt que d'être coupé.
 
 ## Projet REAPER
 
-Au premier lancement, REKA ouvre un **projet vierge** : 6 pistes câblées sur les strips,
+Au premier lancement, REKA ouvre un **projet vierge** : une piste câblée par strip,
 aucun effet. Pour ouvrir ton propre projet (ton traitement, tes VST) :
 
 - clique sur le bouton **Projet** du panneau Master (ou ⚙ → *Changer de projet…*) ;
@@ -69,22 +72,47 @@ sur son insert (désactivable dans ⚙ → Options).
 | Knob Casque | volume du bus A1 (double-clic = 0 dB) |
 | Badge de connexion | vert = tout répond ; rouge = REAPER ou Voicemeeter ne répond plus |
 | Bouton Projet | projet REAPER ouvert ; clic pour en changer |
+| Bouton – (Master) | réduire REKA (barre des tâches, ou zone de notification si activé) |
+| Bouton ⚙ (Master) | réglages : Général, Audio, Apparence, À propos |
 
 `REKA.exe --demo` ouvre la console avec des moteurs simulés (sans Voicemeeter ni REAPER)
 pour la découvrir.
 
+## Personnaliser l'interface
+
+⚙ → onglet **Apparence** :
+
+- **Arrière-plan** : *Choisir une image…* (PNG, JPG, WebP…). L'image est copiée dans
+  `%APPDATA%\REKA`, cadrée pour remplir la fenêtre, et peut être assombrie (curseur
+  *Assombrir l'image*). *Fond d'origine* revient au fond REKA.
+- **Opacité des panneaux** : baisse-la pour voir l'image à travers les strips.
+- **Fenêtre** : REKA s'ouvre en fenêtre compacte, comme Voicemeeter (juste les strips et
+  le Master) ; sa taille et sa position sont mémorisées. *Taille compacte* la remet à sa
+  taille d'origine, centrée. Coche *Réduire dans la zone de notification* pour que le
+  bouton **–** l'envoie à côté de l'horloge (le son continue ; clic sur l'icône REKA pour
+  la rouvrir, clic droit → *Quitter REKA*).
+
+## Voicemeeter Potato ou Banana
+
+⚙ → onglet **Général** → *Édition* : choisis **Potato** (8 entrées, 6 strips) ou
+**Banana** (5 entrées, 5 strips), puis **Redémarrer REKA**. REKA lance alors la bonne
+édition et ouvre un projet vierge adapté (`session-banana.rpp` pour Banana). Ferme l'autre
+édition de Voicemeeter si elle tourne encore. Sur Banana, les knobs d'envoi sont de simples
+interrupteurs on/off (Banana n'a pas de niveaux d'envoi par bus).
+
 ## Correspondance
 
-| Strip | Voicemeeter | Canaux de l'insert (piste REAPER) |
+| Strip | Potato | Banana |
 |---|---|---|
-| Microphone | Strip 0 (entrée matérielle 1) | 1/2 |
-| Musique | Strip 1 (entrée matérielle 2) | 3/4 |
-| Appels | Strip 5 (entrée virtuelle 1) | 11/12 |
-| Bureau | Strip 6 (entrée virtuelle 2) | 19/20 |
-| Autres 1 | Strip 2 (entrée matérielle 3) | 5/6 |
-| Autres 2 | Strip 7 (entrée virtuelle 3) | 27/28 |
+| Microphone | Strip 0 (entrée matérielle 1) — canaux 1/2 | Strip 0 — canaux 1/2 |
+| Musique | Strip 1 (entrée matérielle 2) — canaux 3/4 | Strip 1 — canaux 3/4 |
+| Appels | Strip 5 (entrée virtuelle 1) — canaux 11/12 | Strip 3 (VAIO) — canaux 7/8 |
+| Bureau | Strip 6 (entrée virtuelle 2) — canaux 19/20 | Strip 4 (AUX) — canaux 15/16 |
+| Autres 1 | Strip 2 (entrée matérielle 3) — canaux 5/6 | Strip 2 — canaux 5/6 |
+| Autres 2 | Strip 7 (entrée virtuelle 3) — canaux 27/28 | — |
 
-Modifiable dans `config.json` (`voicemeeter.strip_map`, `voicemeeter.routing`).
+Les canaux sont ceux de l'insert Voicemeeter (entrée de la piste REAPER). Modifiable dans
+`config.json` (`voicemeeter.strip_maps.potato` / `.banana`, `voicemeeter.routing`).
 
 ## Fonctionnement
 
@@ -112,7 +140,8 @@ Modifiable dans `config.json` (`voicemeeter.strip_map`, `voicemeeter.routing`).
 %APPDATA%\REKA\
   config.json      réglages (copie modifiable du config.json livré)
   app.log          journal (3 × 2 Mo)
-  session.rpp      projet vierge de REKA (créé au premier besoin)
+  session.rpp      projet vierge de REKA (session-banana.rpp pour Banana)
+  background.*     image d'arrière-plan choisie
   processes.json   processus lancés par l'app (reprise après plantage)
   bridge\          échanges avec le pont Lua
 ```
@@ -167,7 +196,7 @@ reaper_mixer/
 │   ├── vst_scanner.py      liste des plugins (REAPER, cache, dossiers VST3)
 │   └── demo.py             moteurs simulés (--demo, --selftest)
 ├── ui/                     fenêtre, strips, master, knob/fader/VU dessinés, dialogues
-├── assets/                 logo et icône REKA, police Inter, projet vierge, pont Lua
+├── assets/                 logo et icône REKA, police Inter, pont Lua
 ├── tests/                  tests (logique, pont Lua, interface, Win32)
 ├── config.json
 ├── requirements.txt

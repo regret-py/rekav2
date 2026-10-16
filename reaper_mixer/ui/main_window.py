@@ -1,20 +1,25 @@
 """
 Fenêtre principale : strips alignés à gauche, panneau master à droite, et le
 câblage entre l'interface et les moteurs (Voicemeeter, REAPER, processus).
+
+Fenêtre « comme Voicemeeter » : taille compacte par défaut (strips + master,
+sans grand vide), position et taille mémorisées, réduction possible dans la
+zone de notification (icône à côté de l'horloge).
 """
 
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QPropertyAnimation, Qt, QTimer
-from PySide6.QtGui import QColor, QPainter, QRadialGradient
-from PySide6.QtWidgets import (QGraphicsOpacityEffect, QHBoxLayout, QLabel, QMainWindow,
-                               QMessageBox, QWidget)
+from PySide6.QtCore import QByteArray, QEvent, QPointF, QProcess, QPropertyAnimation, Qt, QTimer
+from PySide6.QtGui import QAction, QColor, QPainter, QPixmap, QRadialGradient
+from PySide6.QtWidgets import (QApplication, QGraphicsOpacityEffect, QHBoxLayout, QLabel,
+                               QMainWindow, QMenu, QMessageBox, QSystemTrayIcon, QWidget)
 
 from core import config
-from core.process_manager import reaper_project
+from core.process_manager import is_blank_project, reaper_project
 from core.voicemeeter_ctrl import DEFAULT_ROUTING, MixerLevels, MixerParams
 from ui import styles
 from ui.master_widget import MasterWidget
@@ -28,15 +33,64 @@ log = logging.getLogger(__name__)
 STRIP_GAP = 12
 FOCUS_PLUGIN_DELAY_MS = 400
 TOAST_MS = 4500
+COMPACT_HEIGHT = 780          # hauteur de la fenêtre compacte (comme Voicemeeter)
+MIN_HEIGHT = 640
+DEFAULT_DARKNESS = 0.45       # assombrissement de l'image d'arrière-plan
+DEFAULT_PANEL_OPACITY = 1.0
+
+
+def background_image_path(cfg: dict) -> Path | None:
+    """Image d'arrière-plan choisie (copiée dans %APPDATA%/REKA), ou None."""
+    path = config.resolve_path(cfg.get("ui", {}).get("background_image"), base=config.app_data_dir())
+    return path if path is not None and path.is_file() else None
+
+
+def restart_command() -> tuple[str, list[str]]:
+    """Commande qui relance REKA (exe ou script), avec --restart pour attendre
+    que l'instance actuelle ait fini de s'arrêter."""
+    if getattr(sys, "frozen", False):
+        return sys.executable, ["--restart"]
+    return sys.executable, [str(Path(sys.argv[0]).resolve()), "--restart"]
 
 
 class Background(QWidget):
-    """Noir profond avec un halo radial vert très sombre, au centre-droit."""
+    """Arrière-plan : image personnalisée (cadrée pour remplir, assombrie), ou
+    noir profond avec un halo radial vert très sombre au centre-droit."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._image: QPixmap | None = None
+        self._scaled: QPixmap | None = None
+        self._darkness = DEFAULT_DARKNESS
+
+    def set_image(self, path: Path | None, darkness: float) -> None:
+        pixmap = QPixmap(str(path)) if path is not None else None
+        self._image = pixmap if pixmap is not None and not pixmap.isNull() else None
+        self._darkness = max(0.0, min(0.95, darkness))
+        self._scaled = None
+        self.update()
+
+    @property
+    def has_image(self) -> bool:
+        return self._image is not None
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        self._scaled = None
+        super().resizeEvent(event)
 
     def paintEvent(self, _event) -> None:  # noqa: N802
         p = QPainter(self)
         p.fillRect(self.rect(), QColor(styles.BG_WINDOW))
         w, h = self.width(), self.height()
+        if self._image is not None:
+            if self._scaled is None:
+                self._scaled = self._image.scaled(
+                    self.size(), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation)
+            p.drawPixmap((w - self._scaled.width()) // 2, (h - self._scaled.height()) // 2,
+                         self._scaled)
+            p.fillRect(self.rect(), styles.color(styles.BG_BLACK, self._darkness))
+            return
         gradient = QRadialGradient(QPointF(w * 0.68, h * 0.42), max(w, h) * 0.62)
         gradient.setColorAt(0.0, styles.color(styles.BG_GLOW, 0.95))
         gradient.setColorAt(0.55, styles.color(styles.BG_GLOW, 0.35))
@@ -100,26 +154,26 @@ class MainWindow(QMainWindow):
         self._vm_ok = True
         self._reaper_ok = reaper.is_connected
         self._device_warned = False
+        self._tray_hint_shown = False
         self._tracks: list = reaper.strip_tracks   # piste REAPER de chaque strip (ou None)
 
         ui_cfg = cfg.setdefault("ui", {})
         self.setWindowTitle(config.APP_NAME)
-        self.resize(int(ui_cfg.get("width", 1920)), int(ui_cfg.get("height", 1040)))
-        self.setMinimumSize(1000, 640)
 
-        central = Background()
-        self.setCentralWidget(central)
-        layout = QHBoxLayout(central)
+        self.background = Background()
+        self.setCentralWidget(self.background)
+        layout = QHBoxLayout(self.background)
         layout.setContentsMargins(12, 12, 14, 12)
         layout.setSpacing(STRIP_GAP)
 
         routing = cfg.get("voicemeeter", {}).get("routing", DEFAULT_ROUTING)
         labels = [route.get("label", route.get("bus", "?")) for route in routing]
         names = list(ui_cfg.get("strip_names", []))
+        sends = bool(getattr(vm, "supports_sends", True))
         self.strips: list[StripWidget] = []
         for index in range(vm.strip_count):
             name = names[index] if index < len(names) else f"Strip {index + 1}"
-            strip = StripWidget(index, name, labels)
+            strip = StripWidget(index, name, labels, sends_adjustable=sends)
             self._wire_strip(strip)
             layout.addWidget(strip)
             self.strips.append(strip)
@@ -129,9 +183,13 @@ class MainWindow(QMainWindow):
         self.master.headphoneChanged.connect(vm.set_headphone_gain)
         self.master.settingsRequested.connect(self.open_settings)
         self.master.projectRequested.connect(self.choose_project)
+        self.master.minimizeRequested.connect(self.minimize)
         layout.addWidget(self.master)
 
-        self.toast = Toast(central)
+        self.toast = Toast(self.background)
+        self._tray = self._make_tray()
+        self.apply_appearance()
+        self._restore_geometry()
 
         # Moteurs → interface
         vm.params_changed.connect(self._on_params)
@@ -205,7 +263,7 @@ class MainWindow(QMainWindow):
 
     def _on_project(self, path: str) -> None:
         name = Path(path).stem if path else "…"
-        if path and Path(path).name.lower() == "session.rpp":
+        if path and is_blank_project(path):
             name = "Projet vierge"
         self.master.set_project(name, path or "(en attente de REAPER)")
 
@@ -283,7 +341,131 @@ class MainWindow(QMainWindow):
                                 persist=self._persist)
         dialog.optionsChanged.connect(lambda: self._on_tracks(self._tracks))
         dialog.projectRequested.connect(self.choose_project)
+        dialog.appearanceChanged.connect(self.apply_appearance)
+        dialog.windowResetRequested.connect(self.reset_window_size)
+        dialog.restartRequested.connect(self.restart_app)
         dialog.exec()
+
+    # ------------------------------------------------------------ apparence
+    def apply_appearance(self) -> None:
+        """Arrière-plan et transparence des panneaux, d'après la config."""
+        ui_cfg = self._cfg.get("ui", {})
+        self.background.set_image(background_image_path(self._cfg),
+                                  float(ui_cfg.get("background_darkness", DEFAULT_DARKNESS)))
+        app = QApplication.instance()
+        if app is not None:
+            styles.set_panel_opacity(app, float(ui_cfg.get("panel_opacity", DEFAULT_PANEL_OPACITY)))
+
+    # -------------------------------------------------------------- fenêtre
+    def compact_size(self) -> tuple[int, int]:
+        """Taille « comme Voicemeeter » : juste les strips et le master."""
+        width = self.background.layout().sizeHint().width()
+        return width, COMPACT_HEIGHT
+
+    def _restore_geometry(self) -> None:
+        width, _ = self.compact_size()
+        self.setMinimumSize(width, MIN_HEIGHT)
+        saved = self._cfg.get("ui", {}).get("geometry")
+        if saved and self.restoreGeometry(QByteArray.fromBase64(saved.encode("ascii"))):
+            return
+        self.reset_window_size()
+
+    def reset_window_size(self) -> None:
+        """Fenêtre compacte, centrée sur l'écran."""
+        if self.isVisible():
+            self.showNormal()
+        width, height = self.compact_size()
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is not None:
+            area = screen.availableGeometry()
+            height = min(height, area.height() - 60)
+            self.resize(width, height)
+            frame = self.frameGeometry()
+            frame.moveCenter(area.center())
+            self.move(frame.topLeft())
+        else:
+            self.resize(width, height)
+
+    def minimize(self) -> None:
+        """Réduit REKA : dans la zone de notification si l'option est active
+        (le son continue de tourner), sinon dans la barre des tâches."""
+        if self._to_tray():
+            # Fenêtre cachée : fermer une popup ne doit pas quitter REKA
+            QApplication.setQuitOnLastWindowClosed(False)
+            self.hide()
+            if not self._tray_hint_shown:
+                self._tray_hint_shown = True
+                self._tray.showMessage(config.APP_NAME, "REKA continue de tourner ici. "
+                                       "Clique sur l'icône pour la rouvrir.",
+                                       self.windowIcon(), 3000)
+        else:
+            self.showMinimized()
+
+    def show_from_tray(self) -> None:
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        QApplication.setQuitOnLastWindowClosed(True)
+
+    def quit_app(self) -> None:
+        """« Quitter REKA » du menu de la zone de notification : la fenêtre peut
+        être cachée, on quitte donc explicitement après l'avoir fermée."""
+        if self.close():
+            QApplication.quit()
+
+    def _to_tray(self) -> bool:
+        return (self._tray is not None
+                and bool(self._cfg.get("ui", {}).get("minimize_to_tray", False)))
+
+    def _make_tray(self) -> QSystemTrayIcon | None:
+        """Icône dans la zone de notification (à côté de l'horloge)."""
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return None
+        app = QApplication.instance()
+        tray = QSystemTrayIcon(app.windowIcon() if app else self.windowIcon(), self)
+        tray.setToolTip(config.APP_NAME)
+        menu = QMenu(self)
+        show_action = QAction("Afficher REKA", menu)
+        show_action.triggered.connect(self.show_from_tray)
+        menu.addAction(show_action)
+        menu.addSeparator()
+        quit_action = QAction("Quitter REKA", menu)
+        quit_action.triggered.connect(self.quit_app)
+        menu.addAction(quit_action)
+        tray.setContextMenu(menu)
+        tray.activated.connect(self._on_tray_activated)
+        tray.show()
+        return tray
+
+    def _on_tray_activated(self, reason) -> None:
+        if reason in (QSystemTrayIcon.ActivationReason.Trigger,
+                      QSystemTrayIcon.ActivationReason.DoubleClick):
+            if self.isVisible() and not self.isMinimized():
+                self.minimize()
+            else:
+                self.show_from_tray()
+
+    def changeEvent(self, event) -> None:  # noqa: N802
+        # Réduction par la barre de titre : direction la zone de notification si demandé
+        if (event.type() == QEvent.Type.WindowStateChange and self.isMinimized()
+                and self._to_tray()):
+            QTimer.singleShot(0, self.minimize)
+        super().changeEvent(event)
+
+    def restart_app(self) -> None:
+        """Relance REKA (changement d'édition de Voicemeeter) : la nouvelle
+        instance attend que celle-ci ait arrêté proprement les moteurs."""
+        if not self._persist:
+            self.toast.show_message("Mode démo : pas de redémarrage.")
+            return
+        self._save_config()
+        program, args = restart_command()
+        if not QProcess.startDetached(program, args):
+            QMessageBox.warning(self, config.APP_NAME,
+                                "Impossible de relancer REKA automatiquement : relance-la à la main.")
+            return
+        log.info("Redémarrage de REKA : %s %s", program, " ".join(args))
+        self.close()
 
     def choose_project(self) -> None:
         """Choix du projet REAPER ; il est ouvert tout de suite, sans redémarrer."""
@@ -305,9 +487,13 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802
         if self._params is not None:
             self._cfg["state"] = self._params.to_state()
-        if not self.isMaximized() and not self.isFullScreen():
-            self._cfg.setdefault("ui", {}).update(width=self.width(), height=self.height())
+        ui_cfg = self._cfg.setdefault("ui", {})
+        ui_cfg["geometry"] = bytes(self.saveGeometry().toBase64()).decode("ascii")
+        for legacy in ("width", "height"):   # remplacés par « geometry »
+            ui_cfg.pop(legacy, None)
         self._save_config()
+        if self._tray is not None:
+            self._tray.hide()
         super().closeEvent(event)
 
     def _save_config(self) -> None:

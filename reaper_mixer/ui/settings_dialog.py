@@ -1,50 +1,72 @@
 """
-Dialogue de réglages : projet REAPER, chemins des moteurs, carte son de
-REAPER, affichage temporaire des fenêtres de Voicemeeter / REAPER, options,
-journaux.
+Réglages de REKA, en onglets :
+  - Général    : projet REAPER, édition de Voicemeeter (Potato / Banana),
+                 chemins des moteurs
+  - Audio      : carte son de REAPER, affichage des moteurs, options
+  - Apparence  : image d'arrière-plan, transparence des panneaux, fenêtre
+  - À propos   : version, développeurs, journaux
 
 Les options s'appliquent tout de suite ; tout est écrit dans la config à la
-fermeture. Les chemins des moteurs ne servent qu'au prochain démarrage.
+fermeture. Les chemins et l'édition de Voicemeeter demandent un redémarrage.
 """
 
 from __future__ import annotations
 
 import logging
+import shutil
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QPixmap
-from PySide6.QtWidgets import (QCheckBox, QDialog, QFileDialog, QFormLayout, QGroupBox,
-                               QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QDialog, QFileDialog, QFormLayout,
+                               QGroupBox, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+                               QRadioButton, QSlider, QTabWidget, QVBoxLayout, QWidget)
 
 from core import config
+from core.process_manager import is_blank_project
+from core.voicemeeter_ctrl import EDITIONS, edition, strip_map
 from ui.project_dialog import default_project
 
 log = logging.getLogger(__name__)
+
+IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.bmp *.webp *.gif)"
+BACKGROUND_STEM = "background"
 
 
 def project_label(path: str) -> str:
     if not path:
         return "Projet vierge REKA (aucun effet)"
-    if Path(path).name.lower() == "session.rpp":
+    if is_blank_project(path):
         return f"Projet vierge REKA — {path}"
     return f"{Path(path).stem} — {path}"
 
 
+def _hint(text: str) -> QLabel:
+    label = QLabel(text)
+    label.setObjectName("hint")
+    label.setWordWrap(True)
+    return label
+
+
 class SettingsDialog(QDialog):
-    optionsChanged = Signal()      # insert / création de pistes modifiés
-    projectRequested = Signal()    # « Changer de projet… »
+    optionsChanged = Signal()        # insert / création de pistes modifiés
+    projectRequested = Signal()      # « Changer de projet… »
+    appearanceChanged = Signal()     # arrière-plan / transparence modifiés
+    windowResetRequested = Signal()  # « Taille compacte »
+    restartRequested = Signal()      # changement d'édition de Voicemeeter
 
     def __init__(self, cfg: dict, processes, reaper, vm, parent: QWidget | None = None,
                  persist: bool = True) -> None:
         super().__init__(parent)
         self.setWindowTitle(f"Réglages — {config.APP_NAME}")
-        self.setMinimumWidth(580)
+        self.setMinimumWidth(600)
         self._cfg = cfg
         self._persist = persist
         self._processes = processes
         self._reaper = reaper
         self._vm = vm
+        # Édition réellement en cours (le choix ne s'applique qu'au redémarrage)
+        self._running_kind = getattr(getattr(vm, "edition", None), "kind", None) or edition(cfg).kind
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
@@ -61,20 +83,18 @@ class SettingsDialog(QDialog):
         header.addStretch(1)
         layout.addLayout(header)
 
-        layout.addWidget(self._project_group())
-        layout.addWidget(self._engines_group())
-        layout.addWidget(self._reaper_group())
-        layout.addWidget(self._options_group())
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self._tab(self._project_group(), self._engines_group()), "Général")
+        self.tabs.addTab(self._tab(self._reaper_group(), self._options_group()), "Audio")
+        self.tabs.addTab(self._tab(self._background_group(), self._window_group()), "Apparence")
+        self.tabs.addTab(self._about_tab(), "À propos")
+        layout.addWidget(self.tabs, 1)
 
         footer = QHBoxLayout()
-        logs = QPushButton("Ouvrir le dossier des journaux")
-        logs.clicked.connect(lambda: QDesktopServices.openUrl(
-            QUrl.fromLocalFile(str(config.app_data_dir()))))
-        footer.addWidget(logs)
-        version = QLabel(f"{config.APP_NAME} {config.APP_VERSION}")
-        version.setObjectName("hint")
+        credits = _hint(f"{config.APP_NAME} {config.APP_VERSION} · par {config.APP_AUTHORS}")
+        credits.setWordWrap(False)
+        footer.addWidget(credits)
         footer.addStretch(1)
-        footer.addWidget(version)
         close = QPushButton("Fermer")
         close.setObjectName("primary")
         close.setDefault(True)
@@ -87,8 +107,21 @@ class SettingsDialog(QDialog):
             reaper.project_changed.connect(self._show_project)
         self._show_device(reaper.device if reaper is not None else None)
         self._show_project(reaper.project_path if reaper is not None else "")
+        self._show_edition()
+        self._show_background()
 
-    # ------------------------------------------------------------ groupes
+    @staticmethod
+    def _tab(*groups: QWidget) -> QWidget:
+        page = QWidget()
+        box = QVBoxLayout(page)
+        box.setContentsMargins(0, 8, 0, 0)
+        box.setSpacing(12)
+        for group in groups:
+            box.addWidget(group)
+        box.addStretch(1)
+        return page
+
+    # ------------------------------------------------------------ Général
     def _project_group(self) -> QGroupBox:
         group = QGroupBox("Projet REAPER")
         box = QVBoxLayout(group)
@@ -96,9 +129,7 @@ class SettingsDialog(QDialog):
         self.project_open.setWordWrap(True)
         self.project_open.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         box.addWidget(self.project_open)
-        self.project_default = QLabel()
-        self.project_default.setObjectName("hint")
-        self.project_default.setWordWrap(True)
+        self.project_default = _hint("")
         box.addWidget(self.project_default)
         change = QPushButton("Changer de projet…")
         change.clicked.connect(self._change_project)
@@ -107,15 +138,32 @@ class SettingsDialog(QDialog):
         return group
 
     def _engines_group(self) -> QGroupBox:
-        group = QGroupBox("Moteurs audio")
+        group = QGroupBox("Voicemeeter et REAPER")
         form = QFormLayout(group)
+
+        editions = QHBoxLayout()
+        self.edition_group = QButtonGroup(self)
+        for kind, ed in EDITIONS.items():
+            radio = QRadioButton(ed.label)
+            radio.setProperty("kind", kind)
+            radio.setChecked(kind == edition(self._cfg).kind)
+            self.edition_group.addButton(radio)
+            editions.addWidget(radio)
+        editions.addStretch(1)
+        self.edition_group.buttonToggled.connect(self._on_edition)
+        form.addRow("Édition", editions)
+        restart_row = QHBoxLayout()
+        self.edition_hint = _hint("")
+        restart_row.addWidget(self.edition_hint, 1)
+        self.restart_button = QPushButton("Redémarrer REKA")
+        self.restart_button.clicked.connect(self._restart)
+        restart_row.addWidget(self.restart_button)
+        form.addRow(restart_row)
+
         self.vm_path = self._path_row(form, "Voicemeeter", "voicemeeter")
         self.reaper_path = self._path_row(form, "REAPER", "reaper")
-        hint = QLabel("Laisse vide pour la détection automatique. "
-                      "Pris en compte au prochain démarrage.")
-        hint.setObjectName("hint")
-        hint.setWordWrap(True)
-        form.addRow(hint)
+        form.addRow(_hint("Laisse vide pour la détection automatique. "
+                          "Pris en compte au prochain démarrage."))
         return group
 
     def _path_row(self, form: QFormLayout, label: str, key: str) -> QLineEdit:
@@ -129,6 +177,7 @@ class SettingsDialog(QDialog):
         form.addRow(label, row)
         return edit
 
+    # -------------------------------------------------------------- Audio
     def _reaper_group(self) -> QGroupBox:
         group = QGroupBox("Carte son de REAPER")
         box = QVBoxLayout(group)
@@ -174,6 +223,100 @@ class SettingsDialog(QDialog):
         box.addWidget(self.close_reaper)
         return group
 
+    # ---------------------------------------------------------- Apparence
+    def _background_group(self) -> QGroupBox:
+        group = QGroupBox("Arrière-plan")
+        box = QVBoxLayout(group)
+        self.background_label = QLabel()
+        self.background_label.setWordWrap(True)
+        box.addWidget(self.background_label)
+        buttons = QHBoxLayout()
+        choose = QPushButton("Choisir une image…")
+        choose.clicked.connect(self._choose_background)
+        buttons.addWidget(choose)
+        self.remove_background = QPushButton("Fond d'origine")
+        self.remove_background.clicked.connect(self._clear_background)
+        buttons.addWidget(self.remove_background)
+        buttons.addStretch(1)
+        box.addLayout(buttons)
+
+        ui_cfg = self._cfg.setdefault("ui", {})
+        self.darkness = self._slider(box, "Assombrir l'image", 0, 90,
+                                     round(float(ui_cfg.get("background_darkness", 0.45)) * 100),
+                                     lambda v: self._set_ui("background_darkness", v / 100))
+        self.opacity = self._slider(box, "Opacité des panneaux", 40, 100,
+                                    round(float(ui_cfg.get("panel_opacity", 1.0)) * 100),
+                                    lambda v: self._set_ui("panel_opacity", v / 100))
+        box.addWidget(_hint("Baisse l'opacité des panneaux pour voir l'image à travers les strips."))
+        return group
+
+    def _slider(self, box: QVBoxLayout, label: str, low: int, high: int, value: int,
+                on_change) -> QSlider:
+        row = QHBoxLayout()
+        caption = QLabel(label)
+        caption.setMinimumWidth(150)
+        row.addWidget(caption)
+        slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setRange(low, high)
+        slider.setValue(max(low, min(high, value)))
+        row.addWidget(slider, 1)
+        percent = QLabel(f"{slider.value()} %")
+        percent.setMinimumWidth(40)
+        row.addWidget(percent)
+        slider.valueChanged.connect(lambda v: (percent.setText(f"{v} %"), on_change(v)))
+        box.addLayout(row)
+        return slider
+
+    def _window_group(self) -> QGroupBox:
+        group = QGroupBox("Fenêtre")
+        box = QVBoxLayout(group)
+        compact = QPushButton("Taille compacte (comme Voicemeeter)")
+        compact.clicked.connect(self.windowResetRequested)
+        box.addWidget(compact)
+        self.minimize_to_tray = QCheckBox(
+            "Réduire dans la zone de notification (à côté de l'horloge)")
+        self.minimize_to_tray.setChecked(bool(self._cfg.get("ui", {}).get("minimize_to_tray", False)))
+        self.minimize_to_tray.toggled.connect(lambda on: self._cfg.setdefault("ui", {})
+                                              .__setitem__("minimize_to_tray", on))
+        box.addWidget(self.minimize_to_tray)
+        box.addWidget(_hint("REKA reste ouverte et le son continue : clique sur l'icône REKA "
+                            "près de l'horloge pour la rouvrir."))
+        return group
+
+    # ----------------------------------------------------------- À propos
+    def _about_tab(self) -> QWidget:
+        page = QWidget()
+        box = QVBoxLayout(page)
+        box.setContentsMargins(0, 12, 0, 0)
+        box.setSpacing(10)
+        logo = QLabel()
+        logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pixmap = QPixmap(str(config.resource_path("assets/reka_logo.png")))
+        if not pixmap.isNull():
+            logo.setPixmap(pixmap.scaledToWidth(360, Qt.TransformationMode.SmoothTransformation))
+        box.addWidget(logo)
+        name = QLabel(f"{config.APP_NAME} {config.APP_VERSION}")
+        name.setObjectName("dialogTitle")
+        name.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        box.addWidget(name)
+        credits = QLabel("Développé par <b>Regrettable</b> et <b>Zerka</b>")
+        credits.setObjectName("credits")
+        credits.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        box.addWidget(credits)
+        about = _hint("Console de mixage pour Voicemeeter et REAPER.")
+        about.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        box.addWidget(about)
+        logs = QPushButton("Ouvrir le dossier des journaux")
+        logs.clicked.connect(lambda: QDesktopServices.openUrl(
+            QUrl.fromLocalFile(str(config.app_data_dir()))))
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(logs)
+        row.addStretch(1)
+        box.addLayout(row)
+        box.addStretch(1)
+        return page
+
     # ------------------------------------------------------------ actions
     def _browse(self, edit: QLineEdit, label: str) -> None:
         path, _ = QFileDialog.getOpenFileName(self, f"Localiser {label}", edit.text(),
@@ -196,6 +339,64 @@ class SettingsDialog(QDialog):
     def _set_option(self, section: str, key: str, value: bool) -> None:
         self._cfg.setdefault(section, {})[key] = value
         self.optionsChanged.emit()
+
+    def _set_ui(self, key: str, value) -> None:
+        self._cfg.setdefault("ui", {})[key] = value
+        self.appearanceChanged.emit()
+
+    def _on_edition(self, button, checked: bool) -> None:
+        if checked:
+            self._cfg.setdefault("voicemeeter", {})["kind"] = button.property("kind")
+            self._show_edition()
+
+    def _restart(self) -> None:
+        self._save()
+        self.restartRequested.emit()
+
+    def _show_edition(self) -> None:
+        chosen = edition(self._cfg)
+        pending = chosen.kind != self._running_kind
+        self.restart_button.setVisible(pending)
+        if pending:
+            self.edition_hint.setText(
+                f"Redémarre REKA pour passer à {chosen.label.split(' (')[0]}. "
+                "Ferme l'autre édition de Voicemeeter si elle tourne encore.")
+        else:
+            self.edition_hint.setText(f"{chosen.label} : {len(strip_map(self._cfg))} strips.")
+
+    def _choose_background(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Choisir une image d'arrière-plan",
+                                              str(Path.home()), IMAGE_FILTER)
+        if path:
+            self.set_background(Path(path))
+
+    def set_background(self, source: Path) -> None:
+        """Copie l'image dans %APPDATA%/REKA (elle reste valable même si
+        l'original est déplacé) et l'applique."""
+        target = config.app_data_dir() / f"{BACKGROUND_STEM}{source.suffix.lower()}"
+        self._remove_background_files(keep=target if source.resolve() == target.resolve() else None)
+        if source.resolve() != target.resolve():
+            shutil.copyfile(source, target)
+        self._set_ui("background_image", target.name)
+        self._show_background()
+
+    def _clear_background(self) -> None:
+        self._remove_background_files()
+        self._set_ui("background_image", "")
+        self._show_background()
+
+    @staticmethod
+    def _remove_background_files(keep: Path | None = None) -> None:
+        for old in config.app_data_dir().glob(f"{BACKGROUND_STEM}.*"):
+            if keep is None or old != keep:
+                old.unlink(missing_ok=True)
+
+    def _show_background(self) -> None:
+        name = self._cfg.get("ui", {}).get("background_image", "")
+        has_image = bool(name)
+        self.background_label.setText("Image personnalisée" if has_image else "Fond d'origine REKA")
+        self.remove_background.setEnabled(has_image)
+        self.darkness.setEnabled(has_image)
 
     def _show_project(self, path: str) -> None:
         self.project_open.setText(f"Ouvert : {project_label(path)}" if path

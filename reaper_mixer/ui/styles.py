@@ -82,7 +82,26 @@ def load_fonts() -> bool:
     return loaded
 
 
-def apply_theme(app: QApplication) -> None:
+def _rgba(value: str, alpha: float) -> str:
+    c = QColor(value)
+    return f"rgba({c.red()}, {c.green()}, {c.blue()}, {max(0.0, min(1.0, alpha)):.3f})"
+
+
+def build_stylesheet(panel_opacity: float = 1.0) -> str:
+    """QSS de l'application. `panel_opacity` < 1 laisse voir l'arrière-plan
+    (image personnalisée) à travers les colonnes et leurs blocs."""
+    return (STYLESHEET
+            .replace("@COLUMN_BG@", _rgba(BG_COLUMN, panel_opacity))
+            .replace("@SECTION_BG@", _rgba(BG_SECTION, panel_opacity)))
+
+
+def set_panel_opacity(app: QApplication, panel_opacity: float) -> None:
+    stylesheet = build_stylesheet(panel_opacity)
+    if app.styleSheet() != stylesheet:   # re-styler toute l'app coûte : seulement si besoin
+        app.setStyleSheet(stylesheet)
+
+
+def apply_theme(app: QApplication, panel_opacity: float = 1.0) -> None:
     """Charge les polices et applique la palette + la QSS à toute l'application."""
     load_fonts()
     app.setFont(font(11))
@@ -104,7 +123,7 @@ def apply_theme(app: QApplication) -> None:
     ):
         palette.setColor(role, QColor(value))
     app.setPalette(palette)
-    app.setStyleSheet(STYLESHEET)
+    app.setStyleSheet(build_stylesheet(panel_opacity))
 
 
 STYLESHEET = f"""
@@ -122,12 +141,12 @@ QMainWindow, QDialog {{
 
 /* ---- colonnes et blocs ---- */
 QFrame#column {{
-    background: {BG_COLUMN};
+    background: @COLUMN_BG@;
     border: 1px solid {BORDER_COLUMN};
     border-radius: 14px;
 }}
 QFrame#section {{
-    background: {BG_SECTION};
+    background: @SECTION_BG@;
     border: 1px solid {BORDER_SECTION};
     border-radius: 10px;
 }}
@@ -356,5 +375,62 @@ QToolTip {{
 }}
 QMessageBox {{
     background: {BG_WINDOW};
+}}
+
+/* ---- onglets, curseurs, choix (réglages) ---- */
+QTabWidget::pane {{
+    border: none;
+    top: -1px;
+}}
+QTabBar::tab {{
+    background: transparent;
+    color: {TEXT_SECONDARY};
+    padding: 7px 14px;
+    margin-right: 4px;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    font-weight: 600;
+}}
+QTabBar::tab:hover {{
+    color: {TEXT_PRIMARY};
+    background: {BUTTON_BG};
+}}
+QTabBar::tab:selected {{
+    color: {TEXT_PRIMARY};
+    background: {BUTTON_BG};
+    border-color: {GREEN_DIM};
+}}
+QSlider::groove:horizontal {{
+    height: 4px;
+    background: {BUTTON_BG};
+    border-radius: 2px;
+}}
+QSlider::sub-page:horizontal {{
+    background: {GREEN_DIM};
+    border-radius: 2px;
+}}
+QSlider::handle:horizontal {{
+    background: {GREEN_NEON};
+    width: 14px;
+    height: 14px;
+    margin: -5px 0;
+    border-radius: 7px;
+}}
+QRadioButton {{
+    spacing: 8px;
+}}
+QRadioButton::indicator {{
+    width: 14px;
+    height: 14px;
+    border-radius: 7px;
+    border: 1px solid {GREEN_DIM};
+    background: {BG_SECTION};
+}}
+QRadioButton::indicator:checked {{
+    background: {GREEN_NEON};
+    border-color: {GREEN_NEON};
+}}
+QLabel#credits {{
+    color: {TEXT_SECONDARY};
 }}
 """

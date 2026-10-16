@@ -16,7 +16,7 @@ def test_config_merge_and_corrupted_file(appdata):
 
     cfg = config.load_config()
     assert config.user_config_path().is_file()
-    assert cfg["voicemeeter"]["strip_map"] == [0, 1, 5, 6, 2, 7]
+    assert cfg["voicemeeter"]["strip_maps"]["potato"] == [0, 1, 5, 6, 2, 7]
 
     config.user_config_path().write_text(json.dumps({"reaper": {"path": "C:/x.exe"}, "extra": 1}))
     cfg = config.load_config()
@@ -95,7 +95,7 @@ def test_project_choice(appdata, cfg, tmp_path):
     from core.process_manager import reaper_project
     from ui.project_dialog import remember_project
 
-    blank = reaper_project(cfg)               # défaut : projet vierge, copié du template
+    blank = reaper_project(cfg)               # défaut : projet vierge généré (aucun effet)
     assert blank.name == "session.rpp" and blank.is_file()
     assert "Microphone" in blank.read_text() and "<VST" not in blank.read_text()
     user = tmp_path / "MAIN.rpp"
@@ -114,6 +114,41 @@ def test_project_choice(appdata, cfg, tmp_path):
     assert cfg["reaper"]["project"] == str(user)
     remember_project(cfg, str(user), make_default=False, ask_on_start=False)   # case décochée
     assert cfg["reaper"]["project"] == "" and cfg["reaper"]["recent_projects"][0] == str(user)
+
+
+def test_banana_edition(appdata, cfg):
+    from core.process_manager import blank_project_path, reaper_project
+    from core.voicemeeter_ctrl import edition, strip_channels, strip_map
+
+    cfg["voicemeeter"]["kind"] = "Banana"
+    assert edition(cfg).strip_count == 5 and not edition(cfg).gain_layers
+    assert strip_map(cfg) == (0, 1, 3, 4, 2)
+    assert strip_channels(cfg) == [0, 2, 6, 14, 4]      # 3 entrées physiques puis VAIO, AUX
+    cfg["voicemeeter"]["strip_maps"]["banana"] = [0, 7, 1]   # 7 n'existe pas sur Banana
+    assert strip_map(cfg) == (0, 1)
+    cfg["voicemeeter"]["strip_maps"]["banana"] = [0, 1, 3, 4, 2]
+
+    project = reaper_project(cfg)               # projet vierge propre à Banana
+    assert project == blank_project_path(cfg) and project.name == "session-banana.rpp"
+    text = project.read_text(encoding="utf-8")
+    assert text.count("<TRACK") == 5 and "NAME Microphone" in text
+    assert "REC 1 1030 1 2" in text and "HWOUT 14 0 1" in text and "<VST" not in text
+    cfg["voicemeeter"]["kind"] = "inconnue"
+    assert edition(cfg).kind == "potato" and blank_project_path(cfg).name == "session.rpp"
+
+
+def test_executable_of_other_edition(tmp_path):
+    from core.process_manager import find_executable, voicemeeter_spec
+
+    folder = tmp_path / "VB" / "Voicemeeter"
+    folder.mkdir(parents=True)
+    potato, banana = folder / "voicemeeter8x64.exe", folder / "voicemeeterpro_x64.exe"
+    potato.write_text("")
+    banana.write_text("")
+    # Chemin de Potato mémorisé, Banana choisie : on prend Banana dans le même dossier
+    assert find_executable(voicemeeter_spec("banana"), str(potato)) == banana
+    assert find_executable(voicemeeter_spec("potato"), str(potato)) == potato
+    assert find_executable(voicemeeter_spec("potato"), str(folder)) == potato
 
 
 def test_legacy_data_migration(appdata):
@@ -282,3 +317,38 @@ def test_voicemeeter_controller(qapp, cfg, monkeypatch):
     vm.close(shutdown_app=True)
     assert remote.params["patch.insert[10]"] == 0.0 and remote.params["patch.insert[1]"] == 1.0
     assert ("Command.Shutdown", 1.0) in remote.sets and remote.logouts == 2
+
+
+def test_voicemeeter_controller_banana(qapp, cfg, monkeypatch):
+    from core.voicemeeter_ctrl import VoicemeeterController
+
+    remote, kinds = FakeRemote(), []
+    remote.fail_login = 0
+    fake = types.ModuleType("voicemeeterlib")
+    fake.api = lambda kind, **kwargs: kinds.append(kind) or remote
+    monkeypatch.setitem(sys.modules, "voicemeeterlib", fake)
+    cfg["voicemeeter"]["kind"] = "banana"
+    cfg["voicemeeter"]["routing"][3]["bus"] = "A5"     # absent de Banana → A2 (par défaut)
+
+    vm = VoicemeeterController(cfg)
+    assert vm.strip_count == 5 and not vm.supports_sends
+    params = []
+    vm.params_changed.connect(params.append)
+    vm.login()
+    assert kinds == ["banana"]
+    vm.start_polling()
+    pump(qapp, 0.3)
+    assert params[-1].strips[0].sends == (0.0, 0.0, 0.0, 0.0)   # pas de GainLayer lu
+
+    vm.set_gain(2, -9.5)             # strip UI 2 = strip VM 3 (VAIO de Banana)
+    vm.set_route(2, 3, True)         # Obs → A2
+    vm.set_send(2, 3, -4.0)          # ignoré : Banana n'a pas de niveaux d'envoi
+    vm.set_inserts({0, 2})
+    pump(qapp, 0.2)
+    sets = dict(remote.sets)
+    assert sets["Strip[3].Gain"] == -9.5 and sets["Strip[3].A2"] == 1.0
+    assert not any("GainLayer" in param for param, _ in remote.sets)
+    assert remote.params["patch.insert[0]"] == 1.0
+    assert remote.params["patch.insert[6]"] == 1.0 and remote.params["patch.insert[7]"] == 1.0
+    vm.close()
+    assert remote.params["patch.insert[6]"] == 0.0 and ("Command.Shutdown", 1.0) not in remote.sets

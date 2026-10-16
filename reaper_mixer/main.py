@@ -54,6 +54,7 @@ LOG_BACKUPS = 3
 BRIDGE_PING_TIMEOUT_S = 1.0  # attente d'un battement de cœur du pont
 BRIDGE_RETRY_S = 0.5         # pause entre deux attentes
 STARTUP_CANCEL_WAIT_MS = 5000
+RESTART_WAIT_MS = 45000      # --restart : attente de la fin de l'instance précédente
 WINDOWS_APP_ID = "REKA.Console"
 
 
@@ -190,6 +191,9 @@ class SplashScreen(QSplashScreen):
         painter.drawText(QRectF(0, 8, cls.WIDTH - 12, 16),
                          Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop,
                          f"v{config.APP_VERSION}")
+        painter.drawText(QRectF(12, 8, cls.WIDTH - 24, 16),
+                         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+                         f"par {config.APP_AUTHORS}")
         painter.setPen(QColor(styles.BORDER_COLUMN))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRoundedRect(QRectF(0.5, 0.5, cls.WIDTH - 1, cls.HEIGHT - 1), 8, 8)
@@ -467,6 +471,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog=config.APP_NAME, add_help=False)
     parser.add_argument("--demo", action="store_true")
     parser.add_argument("--selftest", metavar="IMAGE")
+    parser.add_argument("--restart", action="store_true")  # relance depuis les réglages
     args, _qt_args = parser.parse_known_args(argv[1:])
     return args
 
@@ -505,7 +510,7 @@ def run_selftest(app: QApplication, cfg: dict, window: MainWindow, vm, reaper, p
     if styles.FONT_FAMILY not in QFontDatabase.families():
         problems.append("police Inter non chargée")
     image.parent.mkdir(parents=True, exist_ok=True)
-    window.resize(1920, 1040)
+    window.resize(*window.compact_size())   # fenêtre « comme Voicemeeter » par défaut
     window.show()
     pump(1.2)  # quelques niveaux pour remplir les VU
     shots = {image: window}
@@ -524,11 +529,18 @@ def run_selftest(app: QApplication, cfg: dict, window: MainWindow, vm, reaper, p
     shots[image.with_name(f"{image.stem}_vst{image.suffix}")] = vst
     shots[image.with_name(f"{image.stem}_projet{image.suffix}")] = project
     shots[image.with_name(f"{image.stem}_chargement{image.suffix}")] = splash
-    for path, widget in shots.items():
+    def capture(path: Path, widget) -> None:
         if widget.grab().save(str(path)):
             report.append(f"OK  {path.name} ({widget.width()}×{widget.height()})")
         else:
             problems.append(f"capture impossible : {path.name}")
+
+    for path, widget in shots.items():
+        capture(path, widget)
+    for index, suffix in ((2, "apparence"), (3, "apropos")):   # autres onglets des réglages
+        settings.tabs.setCurrentIndex(index)
+        pump(0.2)
+        capture(image.with_name(f"{image.stem}_{suffix}{image.suffix}"), settings)
     for widget in (settings, vst, project, splash):
         widget.hide()
 
@@ -566,16 +578,19 @@ def main() -> int:
                              "Réinstalle l'application.")
         return 1
     apply_log_level(cfg.get("log_level", "INFO"))
-    styles.apply_theme(app)
+    styles.apply_theme(app, float(cfg.get("ui", {}).get("panel_opacity", 1.0)))
 
     if args.demo or args.selftest:
         return run_demo(app, cfg, args.selftest)
 
-    # Une seule instance : deux consoles se disputeraient Voicemeeter et REAPER
+    # Une seule instance : deux consoles se disputeraient Voicemeeter et REAPER.
+    # Après un redémarrage, on laisse à l'ancienne instance le temps de s'arrêter.
     lock = QLockFile(str(config.app_data_dir() / "instance.lock"))
-    if not lock.tryLock(100):
+    if not lock.tryLock(RESTART_WAIT_MS if args.restart else 100):
         QMessageBox.information(None, config.APP_NAME, f"{config.APP_NAME} est déjà ouvert.")
         return 0
+    if args.restart:
+        cfg = config.load_config()   # relue : l'ancienne instance a pu l'écrire en partant
 
     mixer = MixerApp(app, cfg, log_path)
     app.aboutToQuit.connect(mixer.shutdown)

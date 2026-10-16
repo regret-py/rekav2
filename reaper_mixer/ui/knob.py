@@ -40,10 +40,12 @@ class Knob(QWidget):
     toggled = Signal(bool)
 
     def __init__(self, diameter: int = 30, checkable: bool = True, smooth: bool = False,
-                 default_db: float = 0.0, parent: QWidget | None = None) -> None:
+                 default_db: float = 0.0, adjustable: bool = True,
+                 parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._diameter = diameter
         self._checkable = checkable
+        self._adjustable = adjustable    # False : simple interrupteur (Banana)
         self._smooth = smooth
         self._default = default_db
         self._value = default_db
@@ -154,6 +156,8 @@ class Knob(QWidget):
         if not self._moved and abs(dy) < CLICK_SLOP:
             return
         self._moved = True
+        if not self._adjustable:
+            return
         factor = DRAG_FINE if event.modifiers() & Qt.KeyboardModifier.ShiftModifier else 1.0
         self._user_set_position(self._press_pos + dy / DRAG_PX * factor)
 
@@ -173,6 +177,9 @@ class Knob(QWidget):
             self._user_set(self._default)
 
     def wheelEvent(self, event) -> None:  # noqa: N802
+        if not self._adjustable:
+            event.ignore()
+            return
         steps = event.angleDelta().y() / 120
         factor = DRAG_FINE if event.modifiers() & Qt.KeyboardModifier.ShiftModifier else 1.0
         self._user_set_position(_position(min(self._value, FADER_MAX_DB)) + steps * WHEEL_STEP * factor)
@@ -209,4 +216,7 @@ class Knob(QWidget):
 
     def _update_tooltip(self) -> None:
         state = "" if not self._checkable else (" · activé" if self._active else " · coupé")
+        if not self._adjustable:
+            self.setToolTip(("Envoi activé" if self._active else "Envoi coupé") + " · clic pour basculer")
+            return
         self.setToolTip(f"{format_db(self._value)} dB{state}")

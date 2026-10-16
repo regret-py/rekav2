@@ -34,7 +34,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Signal
 
 from core import config
-from core.voicemeeter_ctrl import DEFAULT_STRIP_MAP, input_channel
+from core.voicemeeter_ctrl import strip_channels
 
 log = logging.getLogger(__name__)
 
@@ -221,9 +221,8 @@ class ReaperController(QObject):
     def __init__(self, cfg: dict, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._cfg = cfg
-        strip_map = cfg.get("voicemeeter", {}).get("strip_map", DEFAULT_STRIP_MAP)
         # Une strip est désignée auprès du pont par son premier canal d'insert
-        self._channels = [input_channel(int(s)) for s in strip_map]
+        self._channels = strip_channels(cfg)
         self._ipc_dir = config.app_data_dir() / "bridge"
         self._session = uuid.uuid4().hex[:12]
         self._lock = threading.Lock()

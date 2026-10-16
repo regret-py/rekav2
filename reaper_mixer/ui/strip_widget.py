@@ -264,9 +264,10 @@ class StripWidget(QFrame):
     fxRemoveRequested = Signal(int, int)
 
     def __init__(self, index: int, name: str, route_labels: list[str],
-                 parent: QWidget | None = None) -> None:
+                 sends_adjustable: bool = True, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.index = index
+        self._sends_adjustable = sends_adjustable   # False : Banana, knobs = interrupteurs
         self.setObjectName("column")
         self.setFixedWidth(STRIP_WIDTH)
         self._track: TrackInfo | None = None
@@ -338,7 +339,7 @@ class StripWidget(QFrame):
         for route, label_text in enumerate(labels):
             cell = QVBoxLayout()
             cell.setSpacing(0)
-            knob = Knob(diameter=ROUTING_KNOB, checkable=True)
+            knob = Knob(diameter=ROUTING_KNOB, checkable=True, adjustable=self._sends_adjustable)
             knob.toggled.connect(lambda on, r=route: self.routeToggled.emit(self.index, r, on))
             knob.valueChanged.connect(lambda db, r=route: self.sendChanged.emit(self.index, r, db))
             label = QLabel(label_text)

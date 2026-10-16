@@ -7,6 +7,49 @@
 # Vérification du build (rend la console en mode démo dans une image) :
 #     "dist/REKA.exe" --selftest selftest/console.png
 
+import os
+import re
+
+try:
+    from PyInstaller.utils.win32.versioninfo import (FixedFileInfo, StringFileInfo, StringStruct,
+                                                     StringTable, VarFileInfo, VarStruct,
+                                                     VSVersionInfo)
+except ImportError:             # build hors Windows : pas de ressource de version
+    VSVersionInfo = None
+
+# Version et développeurs lus dans core/config.py (sans importer l'application)
+with open(os.path.join(SPECPATH, "core", "config.py"), encoding="utf-8") as source:
+    _config_source = source.read()
+
+
+def _constant(name):
+    return re.search(rf'^{name} = "([^"]*)"', _config_source, re.MULTILINE).group(1)
+
+
+APP_VERSION = _constant("APP_VERSION")
+APP_AUTHORS = _constant("APP_AUTHORS")
+_numbers = tuple(int(n) for n in re.findall(r"\d+", APP_VERSION))[:4]
+_numbers += (0,) * (4 - len(_numbers))
+
+# Propriétés de REKA.exe (clic droit > Propriétés > Détails) : version et crédits
+version_info = None if VSVersionInfo is None else VSVersionInfo(
+    ffi=FixedFileInfo(filevers=_numbers, prodvers=_numbers),
+    kids=[
+        StringFileInfo([StringTable("040C04B0", [          # français, Unicode
+            StringStruct("CompanyName", APP_AUTHORS),
+            StringStruct("FileDescription", "REKA"),       # nom affiché par le Gestionnaire des tâches
+            StringStruct("FileVersion", APP_VERSION),
+            StringStruct("InternalName", "REKA"),
+            StringStruct("LegalCopyright", f"© {APP_AUTHORS}"),
+            StringStruct("OriginalFilename", "REKA.exe"),
+            StringStruct("ProductName", "REKA"),
+            StringStruct("ProductVersion", APP_VERSION),
+            StringStruct("Comments", f"Console de mixage Voicemeeter + REAPER, par {APP_AUTHORS}"),
+        ])]),
+        VarFileInfo([VarStruct("Translation", [0x040C, 1200])]),
+    ],
+)
+
 a = Analysis(
     ["main.py"],
     pathex=[],
@@ -34,6 +77,7 @@ exe = EXE(
     [],
     name="REKA",
     icon="assets/icon.ico",
+    version=version_info,
     console=False,               # --windowed
     debug=False,
     bootloader_ignore_signals=False,

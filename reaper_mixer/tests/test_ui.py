@@ -176,6 +176,106 @@ def test_inserts_follow_strip_tracks(qapp, mixer):
     assert vm.inserts == set()
 
 
+def test_custom_background_and_panel_opacity(qapp, mixer, tmp_path, appdata):
+    from PySide6.QtGui import QColor, QPixmap
+
+    from ui.settings_dialog import SettingsDialog
+
+    window, vm, reaper = mixer
+    image = tmp_path / "Fond.PNG"
+    pixmap = QPixmap(40, 30)
+    pixmap.fill(QColor("red"))
+    assert pixmap.save(str(image), "PNG")
+
+    dialog = SettingsDialog(window._cfg, None, reaper, vm, window, persist=False)
+    dialog.appearanceChanged.connect(window.apply_appearance)
+    assert [dialog.tabs.tabText(i) for i in range(dialog.tabs.count())] == [
+        "Général", "Audio", "Apparence", "À propos"]
+    assert not dialog.remove_background.isEnabled()
+    dialog.set_background(image)                # copiée dans %APPDATA%/REKA
+    assert window._cfg["ui"]["background_image"] == "background.png"
+    assert (appdata / "REKA" / "background.png").is_file() and window.background.has_image
+    dialog.darkness.setValue(70)
+    assert window._cfg["ui"]["background_darkness"] == 0.7 and window.background._darkness == 0.7
+    dialog.opacity.setValue(60)
+    assert window._cfg["ui"]["panel_opacity"] == 0.6 and "rgba(" in qapp.styleSheet()
+
+    dialog._clear_background()
+    assert window._cfg["ui"]["background_image"] == "" and not window.background.has_image
+    assert not list((appdata / "REKA").glob("background.*"))
+    dialog.opacity.setValue(100)
+    dialog.done(0)
+
+
+def test_minimize_and_compact_window(qapp, mixer):
+    window, _, _ = mixer
+    QTest.mouseClick(window.master.minimize, LEFT)
+    pump(qapp, 0.05)
+    assert window.isMinimized()
+
+    class FakeTray:
+        def __init__(self):
+            self.messages = []
+
+        def showMessage(self, *args):  # noqa: N802 (API Qt)
+            self.messages.append(args)
+
+        def hide(self):
+            pass
+
+    window._tray = FakeTray()                   # zone de notification simulée
+    window._cfg["ui"]["minimize_to_tray"] = True
+    window.show_from_tray()
+    window.minimize()
+    pump(qapp, 0.05)
+    assert not window.isVisible() and not qapp.quitOnLastWindowClosed()
+    assert len(window._tray.messages) == 1      # l'astuce n'est montrée qu'une fois
+    window.show_from_tray()
+    pump(qapp, 0.05)
+    assert window.isVisible() and not window.isMinimized() and qapp.quitOnLastWindowClosed()
+
+    window.reset_window_size()                  # « Taille compacte (comme Voicemeeter) »
+    pump(qapp, 0.05)
+    assert window.width() == window.compact_size()[0] < 1920
+
+
+def test_edition_choice_needs_restart(qapp, mixer):
+    from ui.settings_dialog import SettingsDialog
+
+    window, vm, reaper = mixer
+    dialog = SettingsDialog(window._cfg, None, reaper, vm, window, persist=False)
+    assert dialog.restart_button.isHidden()     # Potato tourne déjà
+    banana = next(b for b in dialog.edition_group.buttons() if b.property("kind") == "banana")
+    banana.setChecked(True)
+    assert window._cfg["voicemeeter"]["kind"] == "banana"
+    assert not dialog.restart_button.isHidden() and "Banana" in dialog.edition_hint.text()
+    restarts = []
+    dialog.restartRequested.connect(lambda: restarts.append(True))
+    dialog.restart_button.click()
+    assert restarts == [True]
+    dialog.done(0)
+
+
+def test_banana_console(qapp, cfg):
+    from core.demo import DemoProcesses, DemoReaper, DemoVoicemeeter
+    from ui.main_window import MainWindow
+
+    cfg["voicemeeter"]["kind"] = "banana"
+    vm, reaper = DemoVoicemeeter(cfg), DemoReaper(cfg)
+    window = MainWindow(cfg=cfg, vm=vm, reaper=reaper, processes=DemoProcesses(), persist=False)
+    window.show()
+    pump(qapp, 0.2)
+    assert len(window.strips) == 5 and len(reaper.strip_tracks) == 5
+    knob = window.strips[1].knobs[1]
+    center = (knob.width() / 2, knob.height() / 2)
+    before = vm._strips[1].sends
+    drag(knob, center, (center[0], center[1] + 60))   # pas de niveau d'envoi sur Banana
+    click(knob, center)                               # mais la bascule fonctionne
+    pump(qapp, 0.05)
+    assert vm._strips[1].sends == before and vm._strips[1].routes[1]
+    window.close()
+
+
 def test_state_saved_on_close(qapp, mixer):
     window, vm, _ = mixer
     vm.set_route(1, 2, True)

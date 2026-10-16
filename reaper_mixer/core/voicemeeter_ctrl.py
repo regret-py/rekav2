@@ -1,5 +1,5 @@
 """
-Contrôle de Voicemeeter Potato via l'API Remote (voicemeeterlib).
+Contrôle de Voicemeeter (Potato ou Banana) via l'API Remote (voicemeeterlib).
 
 - Un thread de scrutation (30 Hz par défaut) est le seul à parler à l'API :
   il envoie les écritures demandées par l'UI, relit les paramètres quand
@@ -8,8 +8,9 @@ Contrôle de Voicemeeter Potato via l'API Remote (voicemeeterlib).
   valeur voulue, et seule la dernière valeur d'un paramètre est envoyée.
 - Les résultats remontent par signaux Qt, livrés dans le thread UI.
 
-Correspondance par défaut (config.json → voicemeeter.strip_map / routing) :
-    strips UI 0..5 → strips VM 0, 1, 5, 6, 2, 7
+Correspondance par défaut (config.json → voicemeeter.strip_maps / routing) :
+    Potato : strips UI 0..5 → strips VM 0, 1, 5, 6, 2, 7
+    Banana : strips UI 0..4 → strips VM 0, 1, 3, 4, 2 (5 entrées seulement)
     knobs Monitor / Mic Out / Discord / Obs → bus A1 / B1 / B2 / A2
 """
 
@@ -27,9 +28,6 @@ from PySide6.QtCore import QObject, Signal
 
 log = logging.getLogger(__name__)
 
-# Ordre des bus de Voicemeeter Potato (index utilisés par GainLayer[j])
-BUS_NAMES = ("A1", "A2", "A3", "A4", "A5", "B1", "B2", "B3")
-PHYSICAL_STRIPS = 5          # Potato : 5 entrées physiques (2 canaux) puis 3 virtuelles (8 canaux)
 CHANNELS_PER_BUS = 8
 LEVEL_POSTFADER = 1          # types de niveaux de VBVMR_GetLevel
 LEVEL_OUTPUT = 3
@@ -38,7 +36,6 @@ GAIN_MIN_DB, GAIN_MAX_DB = -60.0, 12.0
 ECHO_GUARD_S = 0.5           # après une écriture, on garde notre valeur le temps que VM l'applique
 ERROR_RETRY_S = 1.0
 
-DEFAULT_STRIP_MAP = (0, 1, 5, 6, 2, 7)
 DEFAULT_ROUTING = (
     {"label": "Monitor", "bus": "A1"},
     {"label": "Mic Out", "bus": "B1"},
@@ -47,12 +44,68 @@ DEFAULT_ROUTING = (
 )
 
 
-def input_channel(strip: int) -> int:
+@dataclass(frozen=True)
+class Edition:
+    """Ce qui change d'une édition de Voicemeeter à l'autre."""
+
+    kind: str
+    label: str
+    physical_strips: int           # entrées matérielles : 2 canaux chacune
+    virtual_strips: int            # entrées virtuelles : 8 canaux chacune
+    buses: tuple[str, ...]         # dans l'ordre de l'API (index de Bus[i])
+    gain_layers: bool              # niveaux d'envoi par bus (Strip[i].GainLayer[j])
+    default_strip_map: tuple[int, ...]
+
+    @property
+    def strip_count(self) -> int:
+        return self.physical_strips + self.virtual_strips
+
+
+EDITIONS = {
+    "potato": Edition("potato", "Voicemeeter Potato (8 entrées)", 5, 3,
+                      ("A1", "A2", "A3", "A4", "A5", "B1", "B2", "B3"), True, (0, 1, 5, 6, 2, 7)),
+    "banana": Edition("banana", "Voicemeeter Banana (5 entrées)", 3, 2,
+                      ("A1", "A2", "A3", "B1", "B2"), False, (0, 1, 3, 4, 2)),
+}
+DEFAULT_KIND = "potato"
+# Compatibilité : correspondance Potato par défaut
+DEFAULT_STRIP_MAP = EDITIONS[DEFAULT_KIND].default_strip_map
+PHYSICAL_STRIPS = EDITIONS[DEFAULT_KIND].physical_strips
+
+
+def edition(cfg: dict) -> Edition:
+    """Édition de Voicemeeter choisie (voicemeeter.kind), Potato par défaut."""
+    kind = str(cfg.get("voicemeeter", {}).get("kind", DEFAULT_KIND)).lower()
+    if kind not in EDITIONS:
+        log.warning("Édition Voicemeeter « %s » non gérée, utilisation de Potato.", kind)
+        kind = DEFAULT_KIND
+    return EDITIONS[kind]
+
+
+def strip_map(cfg: dict) -> tuple[int, ...]:
+    """Strips Voicemeeter affichées, dans l'ordre de l'UI, pour l'édition choisie
+    (voicemeeter.strip_maps.<édition>) ; les index hors édition sont ignorés."""
+    ed = edition(cfg)
+    custom = cfg.get("voicemeeter", {}).get("strip_maps", {}).get(ed.kind)
+    strips = tuple(int(s) for s in (custom or ed.default_strip_map))
+    valid = tuple(s for s in strips if 0 <= s < ed.strip_count)
+    if len(valid) != len(strips):
+        log.warning("strip_maps.%s : strips hors de %s ignorées.", ed.kind, ed.label)
+    return valid or ed.default_strip_map
+
+
+def input_channel(strip: int, physical_strips: int = PHYSICAL_STRIPS) -> int:
     """Premier canal d'une strip Voicemeeter dans les tableaux de niveaux et
-    d'insert (Potato : 2 canaux par entrée physique, 8 par entrée virtuelle)."""
-    if strip < PHYSICAL_STRIPS:
+    d'insert : 2 canaux par entrée physique, puis 8 par entrée virtuelle."""
+    if strip < physical_strips:
         return 2 * strip
-    return 2 * PHYSICAL_STRIPS + 8 * (strip - PHYSICAL_STRIPS)
+    return 2 * physical_strips + 8 * (strip - physical_strips)
+
+
+def strip_channels(cfg: dict) -> list[int]:
+    """Premier canal d'insert de chaque strip de l'UI."""
+    ed = edition(cfg)
+    return [input_channel(s, ed.physical_strips) for s in strip_map(cfg)]
 
 
 def amp_to_db(value: float) -> float:
@@ -101,11 +154,18 @@ class VoicemeeterController(QObject):
     def __init__(self, cfg: dict, parent: QObject | None = None) -> None:
         super().__init__(parent)
         section = cfg.get("voicemeeter", {})
-        self._kind = section.get("kind", "potato")
-        self._strips = tuple(int(i) for i in section.get("strip_map", DEFAULT_STRIP_MAP))
-        self._route_buses = tuple(
-            _bus_index(route["bus"]) for route in section.get("routing", DEFAULT_ROUTING))
-        self._headphone_bus = _bus_index(section.get("headphone_bus", "A1"))
+        self._edition = edition(cfg)
+        self._kind = self._edition.kind
+        self._strips = strip_map(cfg)
+        # Bus de chaque knob : nom (« B1 ») et index dans l'API de l'édition
+        routing = section.get("routing", DEFAULT_ROUTING)
+        self._route_names = tuple(
+            _bus_name(route.get("bus", ""), self._edition,
+                      DEFAULT_ROUTING[i]["bus"] if i < len(DEFAULT_ROUTING) else "A1")
+            for i, route in enumerate(routing))
+        self._route_buses = tuple(self._edition.buses.index(n) for n in self._route_names)
+        self._headphone_bus = self._edition.buses.index(
+            _bus_name(section.get("headphone_bus", "A1"), self._edition, "A1"))
         self._interval = 1.0 / max(1.0, float(section.get("poll_hz", 30)))
 
         self._remote = None          # objet voicemeeterlib, créé au login
@@ -196,6 +256,15 @@ class VoicemeeterController(QObject):
     def strip_count(self) -> int:
         return len(self._strips)
 
+    @property
+    def edition(self) -> Edition:
+        return self._edition
+
+    @property
+    def supports_sends(self) -> bool:
+        """Niveaux d'envoi par bus (knobs) : Potato uniquement."""
+        return self._edition.gain_layers
+
     def set_gain(self, strip: int, db: float) -> None:
         self._queue(f"Strip[{self._strips[strip]}].Gain", _clamp_gain(db))
 
@@ -203,10 +272,12 @@ class VoicemeeterController(QObject):
         self._queue(f"Strip[{self._strips[strip]}].Mute", 1.0 if muted else 0.0)
 
     def set_route(self, strip: int, route: int, enabled: bool) -> None:
-        bus = BUS_NAMES[self._route_buses[route]]
+        bus = self._route_names[route]
         self._queue(f"Strip[{self._strips[strip]}].{bus}", 1.0 if enabled else 0.0)
 
     def set_send(self, strip: int, route: int, db: float) -> None:
+        if not self.supports_sends:
+            return  # Banana : pas de GainLayer
         layer = self._route_buses[route]
         self._queue(f"Strip[{self._strips[strip]}].GainLayer[{layer}]", _clamp_gain(db))
 
@@ -300,9 +371,9 @@ class VoicemeeterController(QObject):
             strips.append(StripParams(
                 gain=round(self._get(f"{prefix}.Gain"), 2),
                 mute=self._get(f"{prefix}.Mute") >= 0.5,
-                routes=tuple(self._get(f"{prefix}.{BUS_NAMES[bus]}") >= 0.5
-                             for bus in self._route_buses),
+                routes=tuple(self._get(f"{prefix}.{name}") >= 0.5 for name in self._route_names),
                 sends=tuple(round(self._get(f"{prefix}.GainLayer[{bus}]"), 2)
+                            if self.supports_sends else 0.0
                             for bus in self._route_buses),
             ))
         params = MixerParams(
@@ -317,7 +388,7 @@ class VoicemeeterController(QObject):
         get_level = self._remote.get_level
         strips = []
         for vm_strip in self._strips:
-            channel = input_channel(vm_strip)
+            channel = input_channel(vm_strip, self._edition.physical_strips)
             strips.append((amp_to_db(get_level(LEVEL_POSTFADER, channel)),
                            amp_to_db(get_level(LEVEL_POSTFADER, channel + 1))))
         base = self._headphone_bus * CHANNELS_PER_BUS
@@ -329,7 +400,7 @@ class VoicemeeterController(QObject):
         """Insert activé pour les strips UI de `wanted` ; les autres retrouvent
         la valeur qu'elles avaient avant que l'app n'y touche."""
         for index, vm_strip in enumerate(self._strips):
-            first = input_channel(vm_strip)
+            first = input_channel(vm_strip, self._edition.physical_strips)
             enable = index in wanted
             changed = False
             for channel in (first, first + 1):
@@ -352,8 +423,13 @@ class VoicemeeterController(QObject):
             self.connection_changed.emit(connected)
 
 
-def _bus_index(name: str) -> int:
+def _bus_name(name: str, ed: Edition, fallback: str = "A1") -> str:
+    """Nom de bus valide pour l'édition ; un bus absent (A4 réglé sur Potato,
+    puis passage à Banana) est remplacé par `fallback` plutôt que de bloquer
+    le démarrage."""
     name = str(name).upper()
-    if name not in BUS_NAMES:
-        raise ValueError(f"Bus Voicemeeter inconnu « {name} » (attendu : {', '.join(BUS_NAMES)})")
-    return BUS_NAMES.index(name)
+    if name in ed.buses:
+        return name
+    log.warning("Bus « %s » absent de %s (bus : %s) : %s utilisé à la place.",
+                name, ed.label, ", ".join(ed.buses), fallback)
+    return fallback

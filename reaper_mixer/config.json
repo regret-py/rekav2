@@ -3,7 +3,10 @@
   "voicemeeter": {
     "path": "",
     "kind": "potato",
-    "strip_map": [0, 1, 5, 6, 2, 7],
+    "strip_maps": {
+      "potato": [0, 1, 5, 6, 2, 7],
+      "banana": [0, 1, 3, 4, 2]
+    },
     "routing": [
       {"label": "Monitor", "bus": "A1"},
       {"label": "Mic Out", "bus": "B1"},
@@ -22,7 +25,7 @@
   "reaper": {
     "path": "",
     "resource_path": "",
-    "template": "assets/reaper_template.rpp",
+    "template": "",
     "project": "",
     "ask_project_on_start": false,
     "recent_projects": [],
@@ -36,8 +39,11 @@
     "extra_dirs": []
   },
   "ui": {
-    "width": 1920,
-    "height": 1040,
+    "geometry": "",
+    "minimize_to_tray": false,
+    "background_image": "",
+    "background_darkness": 0.45,
+    "panel_opacity": 1.0,
     "strip_names": ["Microphone", "Musique", "Appels", "Bureau", "Autres 1", "Autres 2"]
   },
   "state": {}

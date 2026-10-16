@@ -23,7 +23,8 @@ from pathlib import Path
 from typing import Any
 
 APP_NAME = "REKA"
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.3.0"
+APP_AUTHORS = "Regrettable & Zerka"
 CONFIG_FILENAME = "config.json"
 LEGACY_DIR_NAME = "REAPER Mixer"   # ancien nom de l'application (données reprises)
 
