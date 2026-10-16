@@ -14,7 +14,7 @@ Qui arrête quoi à la fermeture :
   - un Voicemeeter déjà ouvert par l'utilisateur est seulement « emprunté » :
     masqué pendant la session, puis ré-affiché en partant ;
   - un REAPER déjà ouvert par l'utilisateur est refusé (son projet perso
-    serait piloté, et les ports OSC entreraient en conflit).
+    serait piloté à sa place).
 
 Test manuel (depuis le dossier reaper_mixer/) :
     python -m core.process_manager
