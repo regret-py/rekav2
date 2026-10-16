@@ -1,0 +1,658 @@
+"""
+Gestion des processus Voicemeeter et REAPER : recherche, lancement, masquage
+et arrêt.
+
+L'utilisateur ne doit voir que REAPER Mixer : les deux moteurs tournent avec
+leur fenêtre principale masquée (ShowWindow SW_HIDE). Un chien de garde
+re-masque ces fenêtres si un moteur les ré-affiche de lui-même. Seules les
+fenêtres *principales* sont visées : les fenêtres de plugins VST ouvertes
+depuis l'app restent visibles.
+
+Qui arrête quoi à la fermeture :
+  - un processus lancé par REAPER Mixer (ou resté orphelin après un plantage,
+    reconnu grâce à processes.json) est arrêté si terminate_on_exit = true ;
+  - un Voicemeeter déjà ouvert par l'utilisateur est seulement « emprunté » :
+    masqué pendant la session, puis ré-affiché en partant ;
+  - un REAPER déjà ouvert par l'utilisateur est refusé (son projet perso
+    serait piloté, et les ports OSC entreraient en conflit).
+
+Test manuel (depuis le dossier reaper_mixer/) :
+    python -m core.process_manager
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import shutil
+import subprocess
+import sys
+import threading
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterator
+
+import psutil
+
+from core import config
+
+IS_WINDOWS = sys.platform == "win32"
+
+if IS_WINDOWS:
+    import ctypes
+    import winreg
+    from ctypes import wintypes
+
+    import pywintypes
+    import win32con
+    import win32gui
+    import win32process
+
+    # ShowWindowAsync ne bloque jamais, même si le processus cible est figé
+    # (ShowWindow attendrait sa réponse). Instance user32 dédiée pour ne pas
+    # toucher aux argtypes globaux de ctypes.windll.
+    _user32 = ctypes.WinDLL("user32", use_last_error=True)
+    _user32.ShowWindowAsync.argtypes = (wintypes.HWND, ctypes.c_int)
+    _user32.ShowWindowAsync.restype = wintypes.BOOL
+
+log = logging.getLogger(__name__)
+
+POLL_INTERVAL_S = 0.1          # scrutation des fenêtres pendant un lancement
+WATCHDOG_INTERVAL_S = 0.5      # période du chien de garde (re-masquage, crash)
+KILL_WAIT_S = 3.0              # attente après un arrêt forcé
+DEFAULT_WINDOW_TIMEOUT_S = 30.0
+DEFAULT_CLOSE_TIMEOUT_S = 8.0
+STATE_FILENAME = "processes.json"
+SESSION_PROJECT_NAME = "session.rpp"
+
+
+# --------------------------------------------------------------------------- #
+# Description des applications pilotées
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class AppSpec:
+    key: str                       # section correspondante dans config.json
+    name: str                      # nom affiché à l'utilisateur
+    exe_names: tuple[str, ...]     # par ordre de préférence (64 bits d'abord)
+    install_dirs: tuple[str, ...]  # dossiers standards (%VARIABLES% développées)
+    registry: tuple[tuple[str, str, str], ...]  # (ruche, clé, valeur) → dossier d'install
+    window_classes: tuple[str, ...]  # classes Win32 de la fenêtre principale
+    window_title: str              # repli : fragment du titre (insensible à la casse)
+    download_url: str
+    attach_foreign: bool           # accepter une instance ouverte par l'utilisateur ?
+
+
+# Un exécutable par édition de Voicemeeter (Potato ≠ voicemeeterpro.exe,
+# qui est l'exécutable de Banana).
+_VOICEMEETER_EXES = {
+    "basic": ("voicemeeter_x64.exe", "voicemeeter.exe"),
+    "banana": ("voicemeeterpro_x64.exe", "voicemeeterpro.exe"),
+    "potato": ("voicemeeter8x64.exe", "voicemeeter8.exe"),
+}
+_VOICEMEETER_URLS = {
+    "basic": "https://vb-audio.com/Voicemeeter/index.htm",
+    "banana": "https://vb-audio.com/Voicemeeter/banana.htm",
+    "potato": "https://vb-audio.com/Voicemeeter/potato.htm",
+}
+# Clé de désinstallation commune aux trois éditions (la même que voicemeeterlib)
+_VOICEMEETER_UNINSTALL_KEY = (
+    r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+    r"\VB:Voicemeeter {17359A74-1236-5467}"
+)
+
+
+def voicemeeter_spec(kind: str) -> AppSpec:
+    kind = (kind or "potato").lower()
+    if kind not in _VOICEMEETER_EXES:
+        log.warning("Édition Voicemeeter inconnue « %s », utilisation de potato.", kind)
+        kind = "potato"
+    return AppSpec(
+        key="voicemeeter",
+        name=f"Voicemeeter {kind.capitalize()}",
+        exe_names=_VOICEMEETER_EXES[kind],
+        install_dirs=(
+            r"%ProgramFiles(x86)%\VB\Voicemeeter",
+            r"%ProgramFiles%\VB\Voicemeeter",
+        ),
+        registry=(("HKLM", _VOICEMEETER_UNINSTALL_KEY, "UninstallString"),),
+        window_classes=("VBCABLE0Voicemeeter0MainQSF",),
+        window_title="voicemeeter",
+        download_url=_VOICEMEETER_URLS[kind],
+        attach_foreign=True,
+    )
+
+
+REAPER_SPEC = AppSpec(
+    key="reaper",
+    name="REAPER",
+    exe_names=("reaper.exe",),
+    install_dirs=(
+        r"%ProgramW6432%\REAPER (x64)",
+        r"%ProgramFiles%\REAPER (x64)",
+        r"%ProgramFiles%\REAPER",
+        r"%ProgramFiles(x86)%\REAPER",
+    ),
+    registry=(
+        ("HKLM", r"SOFTWARE\REAPER", ""),
+        ("HKCU", r"SOFTWARE\REAPER", ""),
+        ("HKLM", r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\REAPER",
+         "UninstallString"),
+    ),
+    window_classes=("REAPERwnd",),
+    # Titre type « session.rpp - REAPER v7.xx/x64 » ; volontairement précis pour
+    # ne pas viser d'autres fenêtres de REAPER.
+    window_title="- reaper v",
+    download_url="https://www.reaper.fm/download.php",
+    attach_foreign=False,
+)
+
+
+# --------------------------------------------------------------------------- #
+# Erreurs
+# --------------------------------------------------------------------------- #
+class ProcessManagerError(Exception):
+    """Erreur de démarrage présentable telle quelle à l'utilisateur."""
+
+    hint: str = ""
+
+
+class AppNotInstalledError(ProcessManagerError):
+    def __init__(self, spec: AppSpec) -> None:
+        super().__init__(f"{spec.name} est introuvable sur ce PC.")
+        self.app_name = spec.name
+        self.config_key = spec.key
+        self.exe_name = spec.exe_names[0]
+        self.download_url = spec.download_url
+
+
+class ProcessConflictError(ProcessManagerError):
+    def __init__(self, spec: AppSpec, pid: int) -> None:
+        super().__init__(f"{spec.name} est déjà ouvert en dehors de REAPER Mixer (PID {pid}).")
+        self.hint = f"Ferme {spec.name}, puis clique sur « Réessayer »."
+
+
+class ProcessStartError(ProcessManagerError):
+    pass
+
+
+class StartupAborted(Exception):
+    """Le démarrage a été interrompu (fermeture de l'app pendant le lancement)."""
+
+
+# --------------------------------------------------------------------------- #
+# Recherche des exécutables
+# --------------------------------------------------------------------------- #
+def find_executable(spec: AppSpec, configured: str | None = None) -> Path | None:
+    """Trouve l'exécutable, dans l'ordre : chemin de config.json → processus
+    déjà lancé → registre Windows → dossiers d'installation standards → PATH."""
+    for source, candidate in _executable_candidates(spec, configured):
+        if candidate.is_file():
+            log.info("%s trouvé (%s) : %s", spec.name, source, candidate)
+            return candidate
+    return None
+
+
+def _executable_candidates(spec: AppSpec, configured: str | None) -> Iterator[tuple[str, Path]]:
+    # 1. Chemin configuré : fichier exe, ou dossier qui le contient
+    path = config.resolve_path(configured)
+    if path is not None:
+        if path.is_dir():
+            yield from (("config.json", path / exe) for exe in spec.exe_names)
+        else:
+            yield "config.json", path
+        log.warning("%s : chemin configuré invalide (%s), recherche automatique.",
+                    spec.name, path)
+
+    # 2. Instance déjà lancée (couvre aussi les installations portables)
+    wanted = {exe.lower() for exe in spec.exe_names}
+    for proc in psutil.process_iter(["name", "exe"]):
+        name, exe = proc.info.get("name"), proc.info.get("exe")
+        if name and exe and name.lower() in wanted:
+            yield "processus en cours", Path(exe)
+
+    # 3. Registre (installeurs officiels)
+    for hive, key, value in spec.registry:
+        folder = _registry_install_dir(hive, key, value)
+        if folder is not None:
+            yield from (("registre", folder / exe) for exe in spec.exe_names)
+
+    # 4. Dossiers d'installation standards
+    for folder in spec.install_dirs:
+        base = config.resolve_path(folder)
+        if base is not None:
+            yield from (("dossier standard", base / exe) for exe in spec.exe_names)
+
+    # 5. PATH système
+    for exe in spec.exe_names:
+        found = shutil.which(exe)
+        if found:
+            yield "PATH", Path(found)
+
+
+def _registry_install_dir(hive: str, key: str, value: str) -> Path | None:
+    """Lit une valeur du registre (vues 64 et 32 bits) et en déduit un dossier.
+
+    Accepte un dossier, un exe, ou une ligne de commande de désinstallation
+    du type « "C:\\...\\uninstall.exe" /S »."""
+    if not IS_WINDOWS:
+        return None
+    root = {"HKLM": winreg.HKEY_LOCAL_MACHINE, "HKCU": winreg.HKEY_CURRENT_USER}[hive]
+    for view in (winreg.KEY_WOW64_64KEY, winreg.KEY_WOW64_32KEY):
+        try:
+            with winreg.OpenKey(root, key, 0, winreg.KEY_READ | view) as handle:
+                data, _ = winreg.QueryValueEx(handle, value)
+        except OSError:
+            continue
+        if not isinstance(data, str) or not data.strip():
+            continue
+        raw = data.strip()
+        if raw.startswith('"'):
+            raw = raw[1:].split('"', 1)[0]
+        exe_end = raw.lower().find(".exe")
+        if exe_end >= 0:
+            return Path(raw[: exe_end + 4]).parent
+        return Path(raw)
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# Fenêtres Win32
+# --------------------------------------------------------------------------- #
+def _top_level_windows(pids: set[int]) -> dict[int, list[int]]:
+    """Fenêtres de premier niveau (visibles ou non) des processus donnés."""
+    found: dict[int, list[int]] = {}
+
+    def collect(hwnd: int, _extra: object) -> bool:
+        _tid, pid = win32process.GetWindowThreadProcessId(hwnd)
+        if pid in pids:
+            found.setdefault(pid, []).append(hwnd)
+        return True  # pywin32 lève une erreur si le callback renvoie False
+
+    win32gui.EnumWindows(collect, None)
+    return found
+
+
+def _pick_main_windows(hwnds: list[int], spec: AppSpec) -> list[int]:
+    """Garde les fenêtres principales : sans propriétaire (≠ dialogues, fenêtres
+    de plugins) et reconnues par leur classe Win32. Le titre ne sert que de
+    repli si aucune classe ne correspond, pour ne jamais masquer par erreur
+    une boîte de dialogue (licence, etc.) qui attend l'utilisateur."""
+    by_class: list[int] = []
+    by_title: list[int] = []
+    for hwnd in hwnds:
+        try:
+            if win32gui.GetWindow(hwnd, win32con.GW_OWNER):
+                continue
+            if win32gui.GetClassName(hwnd) in spec.window_classes:
+                by_class.append(hwnd)
+            elif spec.window_title and spec.window_title in win32gui.GetWindowText(hwnd).lower():
+                by_title.append(hwnd)
+        except pywintypes.error:
+            continue  # fenêtre détruite entre-temps
+    return by_class or by_title
+
+
+def _set_windows_visible(hwnds: list[int], visible: bool) -> None:
+    command = win32con.SW_SHOW if visible else win32con.SW_HIDE
+    for hwnd in hwnds:
+        try:
+            if bool(win32gui.IsWindowVisible(hwnd)) != visible:
+                _user32.ShowWindowAsync(hwnd, command)
+        except pywintypes.error:
+            pass
+
+
+# --------------------------------------------------------------------------- #
+# Processus pilotés
+# --------------------------------------------------------------------------- #
+@dataclass
+class ManagedProcess:
+    spec: AppSpec
+    process: psutil.Process
+    launched_by_us: bool
+    popen: subprocess.Popen | None = None  # gardé pour éviter un ResourceWarning
+    keep_hidden: bool = True
+    exit_reported: bool = False
+
+    @property
+    def pid(self) -> int:
+        return self.process.pid
+
+    def is_alive(self) -> bool:
+        try:
+            if not self.process.is_running():
+                return False
+            # Pas de zombies sous Windows ; ailleurs (dev) on les écarte
+            return IS_WINDOWS or self.process.status() != psutil.STATUS_ZOMBIE
+        except psutil.AccessDenied:
+            return True  # processus élevé : il existe, on ne peut juste pas l'inspecter
+        except psutil.Error:
+            return False
+
+    def main_windows(self) -> list[int]:
+        if not IS_WINDOWS:
+            return []
+        return _pick_main_windows(_top_level_windows({self.pid}).get(self.pid, []), self.spec)
+
+
+class ProcessManager:
+    """Lance, masque, surveille et arrête Voicemeeter et REAPER.
+
+    Les méthodes start_* sont bloquantes (attente des fenêtres) : à appeler
+    depuis un thread de travail, jamais depuis le thread UI. Elles sont
+    idempotentes : un second appel ne relance pas un processus vivant.
+    """
+
+    def __init__(self, cfg: dict) -> None:
+        self._cfg = cfg
+        self._procs: dict[str, ManagedProcess] = {}
+        self._lock = threading.RLock()
+        self._abort = threading.Event()
+        self._watchdog_stop = threading.Event()
+        self._watchdog: threading.Thread | None = None
+        self._state_path = config.app_data_dir() / STATE_FILENAME
+
+    # ----------------------------------------------------------- API publique
+    def start_voicemeeter(self) -> None:
+        kind = self._cfg.get("voicemeeter", {}).get("kind", "potato")
+        self._start(voicemeeter_spec(kind), args=[])
+
+    def start_reaper(self) -> None:
+        project = self._prepare_reaper_project()
+        args = ["-nosplash"] + ([str(project)] if project else [])
+        self._start(REAPER_SPEC, args=args)
+
+    def abort_startup(self) -> None:
+        """Interrompt un start_* en cours (lève StartupAborted dans son thread)."""
+        self._abort.set()
+
+    def is_running(self, key: str) -> bool:
+        managed = self._get(key)
+        return managed is not None and managed.is_alive()
+
+    def will_terminate(self, key: str) -> bool:
+        """True si shutdown() arrêtera ce processus : les contrôleurs peuvent
+        alors demander un arrêt propre au moteur avant (sauvegarde, etc.)."""
+        managed = self._get(key)
+        return bool(
+            managed is not None
+            and managed.launched_by_us
+            and self._section(key).get("terminate_on_exit", True)
+        )
+
+    def set_window_visible(self, key: str, visible: bool) -> None:
+        """Affiche ou re-masque la fenêtre principale d'un moteur (ex. pour
+        régler la carte son de REAPER depuis les settings)."""
+        managed = self._get(key)
+        if managed is None or not managed.is_alive():
+            return
+        managed.keep_hidden = not visible
+        if IS_WINDOWS:
+            _set_windows_visible(managed.main_windows(), visible)
+        log.info("%s : fenêtre %s.", managed.spec.name, "affichée" if visible else "masquée")
+
+    def shutdown(self) -> None:
+        """Arrête ce qu'on a lancé, ré-affiche ce qu'on a emprunté."""
+        self._abort.set()
+        self._watchdog_stop.set()
+        if self._watchdog is not None:
+            self._watchdog.join(timeout=2.0)
+
+        with self._lock:
+            procs = list(self._procs.values())
+        # Ordre inverse du lancement : REAPER d'abord, Voicemeeter ensuite
+        for managed in reversed(procs):
+            if not managed.is_alive():
+                continue
+            if self.will_terminate(managed.spec.key):
+                self._terminate(managed)
+            else:
+                managed.keep_hidden = False
+                if IS_WINDOWS:
+                    _set_windows_visible(managed.main_windows(), True)
+                log.info("%s laissé ouvert (PID %d), fenêtre ré-affichée.",
+                         managed.spec.name, managed.pid)
+        # Ne restent dans l'état que nos processus encore vivants
+        # (terminate_on_exit = false) : ils seront repris au prochain lancement.
+        self._save_state()
+
+    # -------------------------------------------------------------- lancement
+    def _start(self, spec: AppSpec, args: list[str]) -> None:
+        if self._abort.is_set():
+            raise StartupAborted()
+        current = self._get(spec.key)
+        if current is not None and current.is_alive():
+            return
+
+        section = self._section(spec.key)
+        exe = find_executable(spec, section.get("path"))
+        if exe is None:
+            raise AppNotInstalledError(spec)
+        section["path"] = str(exe)  # mémorisé : plus de recherche au prochain lancement
+
+        managed = self._adopt_running(spec) or self._launch(spec, exe, args)
+        with self._lock:
+            self._procs[spec.key] = managed
+        self._save_state()
+
+        timeout = float(section.get("window_timeout_s", DEFAULT_WINDOW_TIMEOUT_S))
+        self._hide_when_ready(managed, timeout)
+        self._ensure_watchdog()
+
+    def _adopt_running(self, spec: AppSpec) -> ManagedProcess | None:
+        """Reprend une instance déjà ouverte, si on en a le droit."""
+        wanted = {exe.lower() for exe in spec.exe_names}
+        proc = next(
+            (p for p in psutil.process_iter(["name"])
+             if (p.info.get("name") or "").lower() in wanted),
+            None,
+        )
+        if proc is None:
+            return None
+        if self._was_launched_by_us(spec.key, proc):
+            log.info("%s (PID %d) restait d'une session précédente : repris.",
+                     spec.name, proc.pid)
+            return ManagedProcess(spec, proc, launched_by_us=True)
+        if not spec.attach_foreign:
+            raise ProcessConflictError(spec, proc.pid)
+        log.info("%s déjà ouvert (PID %d) : utilisé tel quel, "
+                 "il sera ré-affiché à la fermeture.", spec.name, proc.pid)
+        return ManagedProcess(spec, proc, launched_by_us=False)
+
+    def _launch(self, spec: AppSpec, exe: Path, args: list[str]) -> ManagedProcess:
+        cmd = [str(exe), *args]
+        log.info("Lancement de %s : %s", spec.name, subprocess.list2cmdline(cmd))
+        kwargs: dict = {
+            "cwd": str(exe.parent),
+            # Flux explicites : en mode --windowed, PyInstaller n'a pas de
+            # stdin/stdout valides à transmettre au processus enfant.
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+        }
+        if IS_WINDOWS:
+            # Demande au processus de démarrer masqué (respecté par la plupart
+            # des applis au premier affichage) : évite un flash à l'écran.
+            startup = subprocess.STARTUPINFO()
+            startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startup.wShowWindow = subprocess.SW_HIDE
+            kwargs["startupinfo"] = startup
+        try:
+            popen = subprocess.Popen(cmd, **kwargs)
+            proc = psutil.Process(popen.pid)
+        except (OSError, psutil.Error) as exc:
+            raise ProcessStartError(f"Impossible de lancer {spec.name} : {exc}") from exc
+        return ManagedProcess(spec, proc, launched_by_us=True, popen=popen)
+
+    def _hide_when_ready(self, managed: ManagedProcess, timeout_s: float) -> None:
+        """Attend l'apparition de la fenêtre principale puis la masque."""
+        if not IS_WINDOWS:
+            return
+        name = managed.spec.name
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if not managed.is_alive():
+                raise ProcessStartError(f"{name} s'est fermé juste après son lancement.")
+            windows = managed.main_windows()
+            if windows:
+                if managed.keep_hidden:
+                    _set_windows_visible(windows, False)
+                log.info("%s prêt (PID %d), fenêtre principale masquée.", name, managed.pid)
+                return
+            if self._abort.wait(POLL_INTERVAL_S):
+                raise StartupAborted()
+        # Pas bloquant : la vraie vérification est la connexion API/OSC qui suit,
+        # et le chien de garde masquera la fenêtre dès qu'elle apparaîtra.
+        log.warning("%s : fenêtre principale introuvable après %.0f s.", name, timeout_s)
+
+    def _prepare_reaper_project(self) -> Path | None:
+        """Projet de session persistant : copié depuis le template au premier
+        lancement, puis réutilisé (les chaînes d'effets sont conservées)."""
+        section = self._section("reaper")
+        project = (config.resolve_path(section.get("project"), base=config.app_data_dir())
+                   or config.app_data_dir() / SESSION_PROJECT_NAME)
+        if project.is_file():
+            return project
+        template = config.resolve_path(section.get("template"))
+        if template is None or not template.is_file():
+            log.warning("Template REAPER introuvable (%s) : REAPER démarre "
+                        "sans projet de session.", template)
+            return None
+        project.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(template, project)
+        log.info("Projet de session créé depuis le template : %s", project)
+        return project
+
+    # ---------------------------------------------------------- surveillance
+    def _ensure_watchdog(self) -> None:
+        with self._lock:
+            if self._watchdog is not None and self._watchdog.is_alive():
+                return
+            self._watchdog_stop.clear()
+            self._watchdog = threading.Thread(
+                target=self._watchdog_loop, name="process-watchdog", daemon=True)
+            self._watchdog.start()
+
+    def _watchdog_loop(self) -> None:
+        while not self._watchdog_stop.wait(WATCHDOG_INTERVAL_S):
+            try:
+                self._watchdog_tick()
+            except Exception:  # le chien de garde ne doit jamais mourir
+                log.exception("Erreur du chien de garde des processus")
+
+    def _watchdog_tick(self) -> None:
+        with self._lock:
+            procs = list(self._procs.values())
+        to_hide: list[ManagedProcess] = []
+        for managed in procs:
+            if managed.is_alive():
+                if managed.keep_hidden:
+                    to_hide.append(managed)
+            elif not managed.exit_reported:
+                managed.exit_reported = True
+                log.error("%s (PID %d) s'est arrêté de manière inattendue.",
+                          managed.spec.name, managed.pid)
+        if IS_WINDOWS and to_hide:
+            # Une seule énumération des fenêtres pour tous les processus
+            windows = _top_level_windows({m.pid for m in to_hide})
+            for managed in to_hide:
+                mains = _pick_main_windows(windows.get(managed.pid, []), managed.spec)
+                _set_windows_visible(mains, False)
+
+    # ----------------------------------------------------------------- arrêt
+    def _terminate(self, managed: ManagedProcess) -> None:
+        """Fermeture polie (WM_CLOSE), puis arrêt forcé après close_timeout_s."""
+        name = managed.spec.name
+        timeout = float(self._section(managed.spec.key).get(
+            "close_timeout_s", DEFAULT_CLOSE_TIMEOUT_S))
+        try:
+            if IS_WINDOWS:
+                for hwnd in managed.main_windows():
+                    try:
+                        win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+                    except pywintypes.error:
+                        pass  # fenêtre déjà détruite
+            else:
+                managed.process.terminate()
+            managed.process.wait(timeout=timeout)
+            log.info("%s fermé proprement.", name)
+            return
+        except psutil.NoSuchProcess:
+            return
+        except psutil.TimeoutExpired:
+            log.warning("%s ne répond pas après %.0f s : arrêt forcé.", name, timeout)
+        except psutil.Error as exc:
+            log.warning("Fermeture polie de %s impossible (%s) : arrêt forcé.", name, exc)
+        try:
+            managed.process.kill()
+            managed.process.wait(timeout=KILL_WAIT_S)
+        except psutil.NoSuchProcess:
+            pass
+        except psutil.Error as exc:
+            log.error("Impossible d'arrêter %s (PID %d) : %s", name, managed.pid, exc)
+
+    # ------------------------------------------------------------- utilitaires
+    def _get(self, key: str) -> ManagedProcess | None:
+        with self._lock:
+            return self._procs.get(key)
+
+    def _section(self, key: str) -> dict:
+        return self._cfg.setdefault(key, {})
+
+    def _was_launched_by_us(self, key: str, proc: psutil.Process) -> bool:
+        """Un processus est « à nous » si son PID et son heure de création
+        correspondent à ceux notés dans processes.json (le PID seul pourrait
+        avoir été réattribué par Windows)."""
+        entry = self._load_state().get(key)
+        if not isinstance(entry, dict):
+            return False
+        try:
+            return (proc.pid == int(entry["pid"])
+                    and abs(proc.create_time() - float(entry["create_time"])) < 0.5)
+        except (psutil.Error, KeyError, TypeError, ValueError):
+            return False
+
+    def _load_state(self) -> dict:
+        try:
+            data = json.loads(self._state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _save_state(self) -> None:
+        """Mémorise les processus qu'on a lancés, pour reconnaître des orphelins
+        si l'app plante et laisse les moteurs tourner en arrière-plan."""
+        state = {}
+        with self._lock:
+            procs = list(self._procs.items())
+        for key, managed in procs:
+            # create_time() est mis en cache par psutil : on vérifie la vie à part
+            if managed.launched_by_us and managed.is_alive():
+                state[key] = {"pid": managed.pid, "create_time": managed.process.create_time()}
+        try:
+            self._state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        except OSError as exc:
+            log.warning("Impossible d'écrire %s : %s", self._state_path, exc)
+
+
+# --------------------------------------------------------------------------- #
+# Test manuel
+# --------------------------------------------------------------------------- #
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.DEBUG,
+                        format="%(asctime)s %(levelname)-7s %(name)s : %(message)s")
+    manager = ProcessManager(config.load_config())
+    try:
+        manager.start_voicemeeter()
+        manager.start_reaper()
+        input("\nVoicemeeter et REAPER tournent, masqués. [Entrée] pour les afficher… ")
+        manager.set_window_visible("voicemeeter", True)
+        manager.set_window_visible("reaper", True)
+        input("[Entrée] pour tout fermer… ")
+    except ProcessManagerError as error:
+        print(f"\nERREUR : {error} {error.hint}")
+    except KeyboardInterrupt:
+        pass
+    finally:
+        manager.shutdown()

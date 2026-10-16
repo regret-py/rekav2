@@ -1,0 +1,15 @@
+# REAPER Mixer — Python 3.11+, Windows 10/11 64 bits
+# Installation : pip install -r requirements.txt
+
+# Interface graphique (Qt6)
+PySide6>=6.6,<7
+# Contrôle de Voicemeeter (API Remote) — s'importe sous le nom « voicemeeterlib »
+voicemeeter-api>=2.5,<3
+# Communication OSC avec REAPER
+python-osc>=1.8,<2
+# Processus, fenêtres et registre Windows
+psutil>=5.9
+pywin32>=306; sys_platform == "win32"
+
+# Build de l'exécutable
+pyinstaller>=6.3
