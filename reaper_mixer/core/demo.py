@@ -48,6 +48,7 @@ class DemoVoicemeeter(QObject):
             for index in range(count)
         ]
         self._headphone = 0.0
+        self.inserts: set[int] = set()
         self._t0 = time.monotonic()
         self._timer = QTimer(self)
         self._timer.setInterval(33)
@@ -93,8 +94,8 @@ class DemoVoicemeeter(QObject):
         self._headphone = db
         self._emit_params()
 
-    def set_inserts(self, enabled: bool) -> None:
-        pass
+    def set_inserts(self, strips) -> None:
+        self.inserts = set(strips)
 
     def apply_state(self, state: dict) -> None:
         pass
@@ -126,6 +127,7 @@ class DemoReaper(QObject):
     connection_changed = Signal(bool)
     tracks_changed = Signal(object)
     device_changed = Signal(object)
+    project_changed = Signal(str)
     installed_fx_ready = Signal(object)
     command_failed = Signal(str)
 
@@ -135,7 +137,7 @@ class DemoReaper(QObject):
         count = len(cfg.get("voicemeeter", {}).get("strip_map", [0] * 6))
         self._tracks = [
             TrackInfo(names[i] if i < len(names) else f"Strip {i + 1}", i != 0,
-                      tuple(FxInfo(n, True, False) for n in DEMO_FX.get(i, [])))
+                      tuple(FxInfo(n, True, False) for n in DEMO_FX.get(i, [])), index=i)
             for i in range(count)
         ]
         self.device = AudioDevice("ASIO", "Voicemeeter Insert Virtual ASIO",
@@ -143,10 +145,19 @@ class DemoReaper(QObject):
         self.installed_fx = list(DEMO_PLUGINS)
         self.is_connected = True
         self.version = "démo"
+        self.project_path = "Démo.rpp"
         QTimer.singleShot(0, self, self._emit)
+
+    @property
+    def strip_tracks(self) -> list[TrackInfo | None]:
+        return list(self._tracks)
 
     def resource_path(self, _exe) -> Path | None:
         return None
+
+    def open_project(self, path) -> None:
+        self.project_path = str(path)
+        self.project_changed.emit(self.project_path)
 
     def start(self) -> None:
         pass

@@ -61,7 +61,7 @@ class FxBadge(QAbstractButton):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = QRectF(2, 2, self.width() - 4, self.height() - 4)
-        on = self.isChecked()
+        on = self.isChecked() and self.isEnabled()   # sans piste REAPER : éteint
         if on:
             p.setPen(QPen(styles.color(styles.GREEN_NEON, 0.25), 3))
             p.setBrush(QColor(styles.GREEN_NEON))
@@ -399,9 +399,13 @@ class StripWidget(QFrame):
         self.clip.set_lit(self.vu.is_clipping())
 
     def set_track(self, track: TrackInfo | None) -> None:
+        """Piste REAPER de la strip (None : aucune piste du projet n'écoute ses canaux)."""
         self._track = track
         if track is None:
             self.fx_list.set_effects([])
+            self.fx_badge.setEnabled(False)
+            self.fx_badge.setToolTip("Aucune piste REAPER pour cette strip : "
+                                     "ajoute un effet pour en créer une.")
             return
         self.fx_list.set_effects([(fx.display_name, fx.enabled, fx.open) for fx in track.fx])
         if self.fx_badge.isChecked() != track.fx_enabled:
@@ -409,10 +413,17 @@ class StripWidget(QFrame):
             self.fx_badge.setChecked(track.fx_enabled)
             self.fx_badge.blockSignals(False)
             self.fx_badge.update()
+        if track.processes_live:
+            self.fx_badge._refresh_tooltip(self.fx_badge.isChecked())
+        else:
+            self.fx_badge.setToolTip(f"La piste REAPER « {track.name} » n'est pas armée en "
+                                     "écoute : ses effets ne s'appliquent pas au son.")
 
-    def set_reaper_available(self, available: bool) -> None:
-        self.fx_list.set_available(available)
-        self.fx_badge.setEnabled(available)
+    def set_reaper_available(self, available: bool, can_add: bool = True) -> None:
+        """REAPER joignable ? `can_add` : un effet peut être ajouté (la strip a
+        une piste, ou l'app a le droit d'en créer une)."""
+        self.fx_list.set_available(available and can_add)
+        self.fx_badge.setEnabled(available and self._track is not None)
 
     def fx_name(self, fx_index: int) -> str:
         if self._track is not None and 0 <= fx_index < len(self._track.fx):

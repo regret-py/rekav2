@@ -141,6 +141,41 @@ def test_headphone_knob_smooth(qapp, mixer):
     assert window.master.value_label.text() == f"{vm._headphone:.2f} dB"
 
 
+def test_project_button_switches_project(qapp, mixer, tmp_path):
+    window, _, reaper = mixer
+    user = tmp_path / "MAIN.rpp"
+    user.write_text("<REAPER_PROJECT\n>\n")
+
+    def pick():
+        dialog = QApplication.activeModalWidget()
+        assert dialog is not None and dialog.list.count() >= 1     # projet vierge en tête
+        dialog.list.setCurrentItem(dialog._add_item(user.stem, str(user)))
+        dialog.make_default.setChecked(True)
+        dialog._accept()
+
+    QTimer.singleShot(150, pick)
+    QTest.mouseClick(window.master.project, LEFT)
+    pump(qapp, 0.3)
+    assert reaper.project_path == str(user)
+    assert window._cfg["reaper"]["project"] == str(user)
+    assert window._cfg["reaper"]["recent_projects"][0] == str(user)
+    assert window.master.project._name == "MAIN"
+
+
+def test_inserts_follow_strip_tracks(qapp, mixer):
+    window, vm, reaper = mixer
+    assert vm.inserts == set(range(6))          # chaque strip a une piste qui traite le son
+    tracks = reaper.strip_tracks
+    tracks[1] = None                            # projet sans piste pour « Musique »
+    reaper.tracks_changed.emit(tracks)
+    pump(qapp, 0.05)
+    assert vm.inserts == {0, 2, 3, 4, 5}
+    assert not window.strips[1].fx_badge.isEnabled() and window.strips[0].fx_badge.isEnabled()
+    window._cfg["voicemeeter"]["manage_insert"] = False
+    window.update_inserts()
+    assert vm.inserts == set()
+
+
 def test_state_saved_on_close(qapp, mixer):
     window, vm, _ = mixer
     vm.set_route(1, 2, True)

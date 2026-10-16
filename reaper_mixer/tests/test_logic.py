@@ -69,6 +69,80 @@ def test_bridge_state_parsing_and_escaping():
     assert display_fx_name("JS: Volume") == "Volume"
 
 
+def test_tracks_with_routing_and_strip_mapping():
+    from core.reaper_ctrl import TrackInfo, parse_state, strip_tracks
+
+    text = "\n".join([
+        "STATE 3", "SESSION s", "ACK 0", "VERSION 7", "PROJECT\tC:/Projets/MAIN.rpp",
+        "TRACK\t0\t\t1\t0\t0\t1\t1\t1",          # mono, entrée 1 (canal 0) : le micro
+        "TRACK\t1\tVoix bis\t1\t0\t0\t1\t1\t1",  # même canal : ignorée (la 1re gagne)
+        "TRACK\t2\tMusique\t1\t0\t1026\t1\t1\t1",
+        "TRACK\t3\tMIDI\t1\t0\t4096\t1\t1\t1",
+        "TRACK\t4\tSans sortie\t1\t0\t1028\t1\t1\t0",
+        "TRACK\t5\tAncien format\t1\t0",         # pont d'avant : champs absents
+        "END 3", ""])
+    state = parse_state(text)
+    assert state.project == "C:/Projets/MAIN.rpp"
+    tracks = state.tracks
+    assert [t.input_channel for t in tracks] == [0, 0, 2, None, 4, None]
+    assert tracks[0].processes_live and not tracks[4].processes_live
+    mapped = strip_tracks(tracks, [0, 2, 10, 18, 4, 26])
+    assert [t.index if t else None for t in mapped] == [0, 2, None, None, 4, None]
+    assert TrackInfo("x", True, ()).input_channel is None
+
+
+def test_project_choice(appdata, cfg, tmp_path):
+    from core.process_manager import reaper_project
+    from ui.project_dialog import remember_project
+
+    blank = reaper_project(cfg)               # défaut : projet vierge, copié du template
+    assert blank.name == "session.rpp" and blank.is_file()
+    assert "Microphone" in blank.read_text() and "<VST" not in blank.read_text()
+    user = tmp_path / "MAIN.rpp"
+    user.write_text("<REAPER_PROJECT\n>\n")
+    assert reaper_project(cfg, str(user)) == user
+    assert reaper_project(cfg, str(tmp_path / "absent.rpp")) == blank   # introuvable → vierge
+    assert reaper_project(cfg, "") == blank
+
+    remember_project(cfg, str(user), make_default=True, ask_on_start=True)
+    assert cfg["reaper"]["project"] == str(user) and cfg["reaper"]["ask_project_on_start"]
+    assert reaper_project(cfg) == user
+    other = tmp_path / "Autre.rpp"
+    other.write_text("x")
+    remember_project(cfg, str(other), make_default=False, ask_on_start=False)
+    assert cfg["reaper"]["recent_projects"] == [str(other), str(user)]
+    assert cfg["reaper"]["project"] == str(user)
+    remember_project(cfg, str(user), make_default=False, ask_on_start=False)   # case décochée
+    assert cfg["reaper"]["project"] == "" and cfg["reaper"]["recent_projects"][0] == str(user)
+
+
+def test_legacy_data_migration(appdata):
+    from core import config
+
+    legacy = appdata / "REAPER Mixer"
+    legacy.mkdir()
+    (legacy / "config.json").write_text(json.dumps({"reaper": {"path": "C:/R/reaper.exe"}}))
+    (legacy / "session.rpp").write_text("<REAPER_PROJECT\n>\n")
+    (legacy / "app.log").write_text("vieux journal")
+    path = config.app_data_dir()
+    assert path == appdata / "REKA"
+    assert (path / "session.rpp").is_file() and not (path / "app.log").exists()
+    assert config.load_config()["reaper"]["path"] == "C:/R/reaper.exe"
+
+
+def test_startup_hook_replaces_legacy_block(tmp_path):
+    from core.reaper_ctrl import STARTUP_BEGIN, install_startup_hook
+
+    scripts = tmp_path / "Scripts"
+    scripts.mkdir()
+    (scripts / "__startup.lua").write_text(
+        "-- >>> REAPER Mixer (bloc gere automatiquement, ne pas modifier)\nancien\n"
+        "-- <<< REAPER Mixer\n-- perso\n")
+    content = install_startup_hook(tmp_path).read_text(encoding="utf-8")
+    assert "REAPER Mixer" not in content and "ancien" not in content
+    assert content.startswith(STARTUP_BEGIN) and content.rstrip().endswith("-- perso")
+
+
 def test_startup_hook_keeps_user_script(tmp_path):
     from core.reaper_ctrl import STARTUP_BEGIN, install_startup_hook, remove_startup_block
 
@@ -191,14 +265,20 @@ def test_voicemeeter_controller(qapp, cfg, monkeypatch):
     vm.set_route(2, 1, True)         # Mic Out = B1
     vm.set_send(2, 3, -4.0)          # Obs = A2 → GainLayer[1]
     vm.set_gain(1, 99)               # borné à +12
-    vm.set_inserts(True)
+    vm.set_inserts({0, 2, 5})        # Microphone (VM 0), Appels (VM 5), Autres 2 (VM 7)
     pump(qapp, 0.2)
     sets = dict(remote.sets)
     assert sets["Strip[5].Gain"] == -9.5 and sets["Strip[5].B1"] == 1.0
     assert sets["Strip[5].GainLayer[1]"] == -4.0 and sets["Strip[1].Gain"] == 12.0
-    assert remote.params["patch.insert[10]"] == 1.0 and remote.params["patch.insert[27]"] == 1.0
+    assert remote.params["patch.insert[0]"] == 1.0 and remote.params["patch.insert[10]"] == 1.0
+    assert remote.params["patch.insert[27]"] == 1.0
+    assert "patch.insert[2]" not in remote.params        # Musique : pas touché
     assert params[-1].strips[2].gain == -9.5   # pas de retour en arrière du fader
 
+    vm.set_inserts({2})              # le micro n'a plus de piste : rendu à l'origine
+    pump(qapp, 0.2)
+    assert remote.params["patch.insert[0]"] == 0.0 and remote.params["patch.insert[10]"] == 1.0
+
     vm.close(shutdown_app=True)
-    assert remote.params["patch.insert[0]"] == 0.0 and remote.params["patch.insert[1]"] == 1.0
+    assert remote.params["patch.insert[10]"] == 0.0 and remote.params["patch.insert[1]"] == 1.0
     assert ("Command.Shutdown", 1.0) in remote.sets and remote.logouts == 2

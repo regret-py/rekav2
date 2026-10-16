@@ -24,6 +24,8 @@
     "resource_path": "",
     "template": "assets/reaper_template.rpp",
     "project": "",
+    "ask_project_on_start": false,
+    "recent_projects": [],
     "manage_routing": true,
     "window_timeout_s": 60,
     "bridge_timeout_s": 90,

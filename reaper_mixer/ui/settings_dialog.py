@@ -1,31 +1,45 @@
 """
-Dialogue de réglages : chemins des moteurs, carte son de REAPER, affichage
-temporaire des fenêtres de Voicemeeter / REAPER, options, journaux.
+Dialogue de réglages : projet REAPER, chemins des moteurs, carte son de
+REAPER, affichage temporaire des fenêtres de Voicemeeter / REAPER, options,
+journaux.
 
-Les changements sont écrits dans la config à la fermeture ; les chemins ne
-servent qu'au prochain démarrage.
+Les options s'appliquent tout de suite ; tout est écrit dans la config à la
+fermeture. Les chemins des moteurs ne servent qu'au prochain démarrage.
 """
 
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
-from PySide6.QtCore import QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import (QCheckBox, QDialog, QFileDialog, QFormLayout, QGroupBox,
                                QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget)
 
 from core import config
+from ui.project_dialog import default_project
 
 log = logging.getLogger(__name__)
 
 
+def project_label(path: str) -> str:
+    if not path:
+        return "Projet vierge REKA (aucun effet)"
+    if Path(path).name.lower() == "session.rpp":
+        return f"Projet vierge REKA — {path}"
+    return f"{Path(path).stem} — {path}"
+
+
 class SettingsDialog(QDialog):
+    optionsChanged = Signal()      # insert / création de pistes modifiés
+    projectRequested = Signal()    # « Changer de projet… »
+
     def __init__(self, cfg: dict, processes, reaper, vm, parent: QWidget | None = None,
                  persist: bool = True) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Réglages — REAPER Mixer")
-        self.setMinimumWidth(560)
+        self.setWindowTitle(f"Réglages — {config.APP_NAME}")
+        self.setMinimumWidth(580)
         self._cfg = cfg
         self._persist = persist
         self._processes = processes
@@ -35,10 +49,19 @@ class SettingsDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
+        header = QHBoxLayout()
+        logo = QLabel()
+        pixmap = QPixmap(str(config.resource_path("assets/reka_mark.png")))
+        if not pixmap.isNull():
+            logo.setPixmap(pixmap.scaledToHeight(30, Qt.TransformationMode.SmoothTransformation))
+        header.addWidget(logo)
         title = QLabel("Réglages")
         title.setObjectName("dialogTitle")
-        layout.addWidget(title)
+        header.addWidget(title)
+        header.addStretch(1)
+        layout.addLayout(header)
 
+        layout.addWidget(self._project_group())
         layout.addWidget(self._engines_group())
         layout.addWidget(self._reaper_group())
         layout.addWidget(self._options_group())
@@ -61,9 +84,28 @@ class SettingsDialog(QDialog):
 
         if reaper is not None:
             reaper.device_changed.connect(self._show_device)
+            reaper.project_changed.connect(self._show_project)
         self._show_device(reaper.device if reaper is not None else None)
+        self._show_project(reaper.project_path if reaper is not None else "")
 
     # ------------------------------------------------------------ groupes
+    def _project_group(self) -> QGroupBox:
+        group = QGroupBox("Projet REAPER")
+        box = QVBoxLayout(group)
+        self.project_open = QLabel()
+        self.project_open.setWordWrap(True)
+        self.project_open.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        box.addWidget(self.project_open)
+        self.project_default = QLabel()
+        self.project_default.setObjectName("hint")
+        self.project_default.setWordWrap(True)
+        box.addWidget(self.project_default)
+        change = QPushButton("Changer de projet…")
+        change.clicked.connect(self._change_project)
+        change.setEnabled(self._reaper is not None)
+        box.addWidget(change)
+        return group
+
     def _engines_group(self) -> QGroupBox:
         group = QGroupBox("Moteurs audio")
         form = QFormLayout(group)
@@ -88,7 +130,7 @@ class SettingsDialog(QDialog):
         return edit
 
     def _reaper_group(self) -> QGroupBox:
-        group = QGroupBox("REAPER")
+        group = QGroupBox("Carte son de REAPER")
         box = QVBoxLayout(group)
         self.device_label = QLabel()
         self.device_label.setWordWrap(True)
@@ -115,12 +157,14 @@ class SettingsDialog(QDialog):
         box = QVBoxLayout(group)
         vm_cfg, reaper_cfg = self._cfg.setdefault("voicemeeter", {}), self._cfg.setdefault("reaper", {})
         self.manage_insert = QCheckBox(
-            "Faire passer les strips par REAPER (insert Voicemeeter automatique)")
+            "Faire passer les strips par leurs effets REAPER (insert Voicemeeter automatique)")
         self.manage_insert.setChecked(bool(vm_cfg.get("manage_insert", True)))
-        self.manage_insert.toggled.connect(self._apply_insert_option)
+        self.manage_insert.toggled.connect(lambda on: self._set_option("voicemeeter", "manage_insert", on))
         box.addWidget(self.manage_insert)
-        self.manage_routing = QCheckBox("Configurer automatiquement les pistes de REAPER")
+        self.manage_routing = QCheckBox(
+            "Créer une piste REAPER quand on ajoute un effet à une strip qui n'en a pas")
         self.manage_routing.setChecked(bool(reaper_cfg.get("manage_routing", True)))
+        self.manage_routing.toggled.connect(lambda on: self._set_option("reaper", "manage_routing", on))
         box.addWidget(self.manage_routing)
         self.close_vm = QCheckBox("Fermer Voicemeeter en quittant")
         self.close_vm.setChecked(bool(vm_cfg.get("terminate_on_exit", True)))
@@ -145,10 +189,22 @@ class SettingsDialog(QDialog):
         self.show_reaper.setChecked(True)
         self._reaper.open_preferences()
 
-    def _apply_insert_option(self, enabled: bool) -> None:
-        device = self._reaper.device if self._reaper is not None else None
-        if self._vm is not None:
-            self._vm.set_inserts(enabled and device is not None and device.is_voicemeeter_insert)
+    def _change_project(self) -> None:
+        self.projectRequested.emit()
+        self._show_project(self._reaper.project_path if self._reaper is not None else "")
+
+    def _set_option(self, section: str, key: str, value: bool) -> None:
+        self._cfg.setdefault(section, {})[key] = value
+        self.optionsChanged.emit()
+
+    def _show_project(self, path: str) -> None:
+        self.project_open.setText(f"Ouvert : {project_label(path)}" if path
+                                  else "Ouvert : (en attente de REAPER)")
+        default = default_project(self._cfg)
+        ask = self._cfg.get("reaper", {}).get("ask_project_on_start", False)
+        self.project_default.setText(
+            f"Au démarrage : {project_label(default)}"
+            + (" — choix demandé à chaque démarrage" if ask else ""))
 
     def _show_device(self, device) -> None:
         if device is None:
@@ -174,23 +230,23 @@ class SettingsDialog(QDialog):
         if self.show_vm.isChecked():
             self._show_engine("voicemeeter", False)
         if self._reaper is not None:
-            try:
-                self._reaper.device_changed.disconnect(self._show_device)
-            except (RuntimeError, TypeError):
-                pass
+            for signal, slot in ((self._reaper.device_changed, self._show_device),
+                                 (self._reaper.project_changed, self._show_project)):
+                try:
+                    signal.disconnect(slot)
+                except (RuntimeError, TypeError):
+                    pass
         self._save()
         super().done(result)
 
     def _save(self) -> None:
-        if not self._persist:
-            return
         vm_cfg, reaper_cfg = self._cfg.setdefault("voicemeeter", {}), self._cfg.setdefault("reaper", {})
         vm_cfg["path"] = self.vm_path.text().strip()
         reaper_cfg["path"] = self.reaper_path.text().strip()
-        vm_cfg["manage_insert"] = self.manage_insert.isChecked()
-        reaper_cfg["manage_routing"] = self.manage_routing.isChecked()
         vm_cfg["terminate_on_exit"] = self.close_vm.isChecked()
         reaper_cfg["terminate_on_exit"] = self.close_reaper.isChecked()
+        if not self._persist:
+            return
         try:
             config.save_config(self._cfg)
         except OSError as exc:

@@ -1,4 +1,4 @@
-# Construit « REAPER Mixer.exe » sur une machine Windows de GitHub à chaque push,
+# Construit « REKA.exe » sur une machine Windows de GitHub à chaque push,
 # après les tests, et le publie dans une release téléchargeable.
 name: Build Windows
 
@@ -65,16 +65,16 @@ jobs:
           APPDATA: ${{ runner.temp }}/appdata
         run: |
           mkdir -p selftest
-          "./dist/REAPER Mixer.exe" --selftest "$(pwd -W)/selftest/console.png"
+          "./dist/REKA.exe" --selftest "$(pwd -W)/selftest/console.png"
           cat selftest/console.txt
           grep -q "RÉSULTAT : OK" selftest/console.txt
           ls -la dist selftest
       - name: Artefact
         uses: actions/upload-artifact@v4
         with:
-          name: REAPER-Mixer
+          name: REKA
           path: |
-            reaper_mixer/dist/REAPER Mixer.exe
+            reaper_mixer/dist/REKA.exe
             reaper_mixer/selftest/
       - name: Release « build-<branche> »
         if: github.event_name == 'push'
@@ -82,13 +82,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="build-${GITHUB_REF_NAME//\//-}"
-          cp "dist/REAPER Mixer.exe" dist/REAPER-Mixer.exe
           gh release delete "$tag" --yes --cleanup-tag || true
-          gh release create "$tag" dist/REAPER-Mixer.exe selftest/console.png \
+          gh release create "$tag" dist/REKA.exe selftest/console.png \
             --prerelease --target "$GITHUB_SHA" \
-            --title "REAPER Mixer — dernier build ($GITHUB_REF_NAME)" \
+            --title "REKA — dernier build ($GITHUB_REF_NAME)" \
             --notes "Exécutable Windows construit automatiquement depuis $GITHUB_SHA.
 
-          Télécharge **REAPER-Mixer.exe** et lance-le. Il faut Voicemeeter Potato et REAPER installés.
-          Pour voir la console sans eux : \`REAPER-Mixer.exe --demo\`.
+          Télécharge **REKA.exe** et lance-le. Il faut Voicemeeter Potato et REAPER installés.
+          Pour voir la console sans eux : \`REKA.exe --demo\`.
           console.png : rendu de l'auto-test fait par ce build."

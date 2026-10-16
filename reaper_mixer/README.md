@@ -1,4 +1,6 @@
-# REAPER Mixer
+<p align="center"><img src="assets/reka_logo.png" alt="REKA" width="420"></p>
+
+# REKA
 
 Console de mixage unique pour Windows : elle pilote **Voicemeeter Potato** (routing,
 volumes, mutes, VU-mètres) et **REAPER** (effets VST par strip), qui tournent tous les
@@ -8,8 +10,8 @@ deux cachés en arrière-plan. L'utilisateur ne voit que la console.
 
 ## Télécharger l'exécutable
 
-Chaque push construit automatiquement `REAPER-Mixer.exe` sur une machine Windows de
-GitHub (onglet **Actions**, workflow *Build Windows*) et le publie dans une release
+Chaque push construit automatiquement `REKA.exe` sur une machine Windows de GitHub
+(onglet **Actions**, workflow *Build Windows*) et le publie dans une release
 **build-&lt;branche&gt;** (onglet **Releases**). Rien à installer pour le compiler.
 
 ## Prérequis
@@ -26,14 +28,32 @@ localiser l'exécutable s'il est installé ailleurs.
 Les effets s'appliquent grâce à l'**insert** de Voicemeeter : chaque strip envoie son son
 à REAPER, qui le renvoie traité. Une seule chose à régler, une fois :
 
-1. Lance REAPER Mixer.
+1. Lance REKA.
 2. Clique sur ⚙ (panneau Master) → **Ouvrir les préférences audio de REAPER**.
-3. Dans REAPER : *Audio system* = **ASIO**, pilote = **Voicemeeter Insert Virtual ASIO**.
-   Valide, puis ferme les réglages : la fenêtre de REAPER se cache de nouveau.
+3. Dans REAPER : *Audio system* = **ASIO**, pilote = **Voicemeeter Insert Virtual ASIO**
+   (« Voicemeeter Potato Insert Virtual ASIO » selon la version). Valide, puis ferme les
+   réglages : la fenêtre de REAPER se cache de nouveau.
 
-L'app active alors l'insert des 6 strips toute seule (et le remet comme avant en partant).
-Tant que REAPER n'est pas sur ce pilote, l'insert n'est pas activé : le son passe sans
-effets plutôt que d'être coupé.
+L'app active alors l'insert des strips qui ont une piste REAPER (et le remet comme avant
+en partant). Tant que REAPER n'est pas sur ce pilote, l'insert n'est pas activé : le son
+passe sans effets plutôt que d'être coupé.
+
+## Projet REAPER
+
+Au premier lancement, REKA ouvre un **projet vierge** : 6 pistes câblées sur les strips,
+aucun effet. Pour ouvrir ton propre projet (ton traitement, tes VST) :
+
+- clique sur le bouton **Projet** du panneau Master (ou ⚙ → *Changer de projet…*) ;
+- choisis un projet récent ou **Parcourir…** un `.rpp` ;
+- coche **Ouvrir ce projet automatiquement au démarrage** pour qu'il devienne le projet
+  par défaut ; coche **Me demander quel projet ouvrir à chaque démarrage** si tu veux
+  choisir à chaque lancement.
+
+Le projet s'ouvre tout de suite dans REAPER, sans redémarrer. **Son câblage n'est jamais
+modifié** : chaque strip affiche la piste du projet qui écoute ses canaux Voicemeeter
+(par exemple une piste dont l'entrée est « Input 1 » ou « Input 1 / Input 2 » va sur
+Microphone). Si une strip n'a pas de piste, ajouter un effet dessus en crée une, câblée
+sur son insert (désactivable dans ⚙ → Options).
 
 ## Utilisation
 
@@ -48,20 +68,21 @@ effets plutôt que d'être coupé.
 | Nom de la strip | double-clic pour renommer (renomme aussi la piste REAPER) |
 | Knob Casque | volume du bus A1 (double-clic = 0 dB) |
 | Badge de connexion | vert = tout répond ; rouge = REAPER ou Voicemeeter ne répond plus |
+| Bouton Projet | projet REAPER ouvert ; clic pour en changer |
 
-`REAPER-Mixer.exe --demo` ouvre la console avec des moteurs simulés (sans Voicemeeter ni
-REAPER) pour la découvrir.
+`REKA.exe --demo` ouvre la console avec des moteurs simulés (sans Voicemeeter ni REAPER)
+pour la découvrir.
 
 ## Correspondance
 
-| Strip | Voicemeeter | Piste REAPER | Canaux de l'insert |
-|---|---|---|---|
-| Microphone | Strip 0 (entrée matérielle 1) | 1 | 1/2 |
-| Musique | Strip 1 (entrée matérielle 2) | 2 | 3/4 |
-| Appels | Strip 5 (entrée virtuelle 1) | 3 | 11/12 |
-| Bureau | Strip 6 (entrée virtuelle 2) | 4 | 19/20 |
-| Autres 1 | Strip 2 (entrée matérielle 3) | 5 | 5/6 |
-| Autres 2 | Strip 7 (entrée virtuelle 3) | 6 | 27/28 |
+| Strip | Voicemeeter | Canaux de l'insert (piste REAPER) |
+|---|---|---|
+| Microphone | Strip 0 (entrée matérielle 1) | 1/2 |
+| Musique | Strip 1 (entrée matérielle 2) | 3/4 |
+| Appels | Strip 5 (entrée virtuelle 1) | 11/12 |
+| Bureau | Strip 6 (entrée virtuelle 2) | 19/20 |
+| Autres 1 | Strip 2 (entrée matérielle 3) | 5/6 |
+| Autres 2 | Strip 7 (entrée virtuelle 3) | 27/28 |
 
 Modifiable dans `config.json` (`voicemeeter.strip_map`, `voicemeeter.routing`).
 
@@ -69,33 +90,34 @@ Modifiable dans `config.json` (`voicemeeter.strip_map`, `voicemeeter.routing`).
 
 - **Voicemeeter** : API Remote via `voicemeeterlib`. Un thread lit paramètres et niveaux
   à 30 Hz ; les réglages de l'UI sont envoyés sans bloquer l'interface.
-- **REAPER** : un petit script Lua (`assets/reaper_mixer_bridge.lua`) tourne dans REAPER et
-  échange avec l'app par fichiers texte dans `%APPDATA%\REAPER Mixer\bridge`. Il utilise
+- **REAPER** : un petit script Lua (`assets/reka_bridge.lua`) tourne dans REAPER et
+  échange avec l'app par fichiers texte dans `%APPDATA%\REKA\bridge`. Il utilise
   directement l'API de REAPER (ajout d'un plugin par son nom, suppression, bypass,
-  ouverture des interfaces, sauvegarde). L'OSC natif de REAPER ne sait pas faire tout ça
-  et demanderait un réglage manuel.
+  ouverture des interfaces, ouverture de projet, sauvegarde). L'OSC natif de REAPER ne
+  sait pas faire tout ça et demanderait un réglage manuel.
 - Le pont est chargé par un bloc ajouté en tête de `Scripts\__startup.lua` de REAPER. Ce
   bloc ne fait rien quand tu lances REAPER toi-même : il ne s'active que si REAPER est
-  lancé par l'app.
-- Le projet REAPER est conservé dans `%APPDATA%\REAPER Mixer\session.rpp` (créé depuis
-  `assets/reaper_template.rpp`) : tes chaînes d'effets et leurs réglages sont gardés
-  d'un lancement à l'autre (sauvegarde à chaque changement + toutes les 30 s).
+  lancé par REKA.
+- Le projet ouvert est sauvegardé à chaque changement d'effet, toutes les 30 s s'il a
+  été modifié, et à la fermeture.
 - Fenêtres : Voicemeeter et REAPER sont masqués (et re-masqués s'ils réapparaissent).
   Les interfaces des plugins restent visibles et passent au premier plan.
-- À la fermeture : sauvegarde du projet, extinction propre de Voicemeeter
-  (`Command.Shutdown`), puis arrêt de REAPER. Un Voicemeeter déjà ouvert avant l'app
+- À la fermeture : sauvegarde du projet, inserts rendus, arrêt de REAPER, puis extinction
+  propre de Voicemeeter (`Command.Shutdown`). Un Voicemeeter déjà ouvert avant l'app
   n'est pas fermé : il est simplement ré-affiché.
 
 ## Fichiers
 
 ```
-%APPDATA%\REAPER Mixer\
+%APPDATA%\REKA\
   config.json      réglages (copie modifiable du config.json livré)
   app.log          journal (3 × 2 Mo)
-  session.rpp      projet REAPER de la console
+  session.rpp      projet vierge de REKA (créé au premier besoin)
   processes.json   processus lancés par l'app (reprise après plantage)
   bridge\          échanges avec le pont Lua
 ```
+
+Les données de l'ancien dossier `%APPDATA%\REAPER Mixer` sont reprises automatiquement.
 
 ## Dépannage
 
@@ -105,7 +127,10 @@ Modifiable dans `config.json` (`voicemeeter.strip_map`, `voicemeeter.routing`).
   plugins, ce qui peut prendre une minute : clique sur *Réessayer*. Vérifie aussi qu'aucune
   fenêtre de REAPER (licence d'évaluation…) n'attend une réponse.
 - **Pas d'effet sur le son** : vérifie la carte son de REAPER dans ⚙ (doit indiquer
-  « Voicemeeter Insert Virtual ASIO »).
+  « Voicemeeter Insert Virtual ASIO »), et que la piste de la strip est armée en écoute
+  (sinon le badge FX l'indique au survol). Si REAPER affiche « [audio device closed] »,
+  décoche dans ses préférences *Audio → Close audio device when stopped and application
+  is inactive*.
 - **Voir Voicemeeter ou REAPER** : ⚙ → cases *Afficher la fenêtre…* (re-masquées à la
   fermeture des réglages).
 
@@ -119,7 +144,7 @@ python -m pip install -r requirements.txt pytest
 python main.py            # la vraie console
 python main.py --demo     # moteurs simulés
 python -m pytest tests    # tests (le pont Lua est testé si lua5.4 est installé)
-python -m PyInstaller --noconfirm --clean build.spec   # → dist\REAPER Mixer.exe
+python -m PyInstaller --noconfirm --clean build.spec   # → dist\REKA.exe
 ```
 
 Avec le Python du Microsoft Store, `pip` peut échouer sur des chemins trop longs : active
@@ -135,14 +160,14 @@ Arborescence :
 reaper_mixer/
 ├── main.py                 démarrage, écran de chargement, popups, arrêt
 ├── core/
-│   ├── config.py           config.json (défauts + %APPDATA%), chemins
-│   ├── process_manager.py  recherche, lancement, masquage, arrêt des moteurs
+│   ├── config.py           config.json (défauts + %APPDATA%\REKA), chemins
+│   ├── process_manager.py  moteurs (recherche, lancement, masquage, arrêt), projet REAPER
 │   ├── voicemeeter_ctrl.py faders, mutes, routing, envois, insert, VU (30 Hz)
-│   ├── reaper_ctrl.py      liaison avec le pont Lua (effets, pistes, carte son)
+│   ├── reaper_ctrl.py      liaison avec le pont Lua (effets, pistes, projet, carte son)
 │   ├── vst_scanner.py      liste des plugins (REAPER, cache, dossiers VST3)
 │   └── demo.py             moteurs simulés (--demo, --selftest)
 ├── ui/                     fenêtre, strips, master, knob/fader/VU dessinés, dialogues
-├── assets/                 police Inter, icône, template REAPER, pont Lua
+├── assets/                 logo et icône REKA, police Inter, projet vierge, pont Lua
 ├── tests/                  tests (logique, pont Lua, interface, Win32)
 ├── config.json
 ├── requirements.txt

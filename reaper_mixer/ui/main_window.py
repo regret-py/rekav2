@@ -6,6 +6,7 @@ câblage entre l'interface et les moteurs (Voicemeeter, REAPER, processus).
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from PySide6.QtCore import QPointF, QPropertyAnimation, Qt, QTimer
 from PySide6.QtGui import QColor, QPainter, QRadialGradient
@@ -13,9 +14,11 @@ from PySide6.QtWidgets import (QGraphicsOpacityEffect, QHBoxLayout, QLabel, QMai
                                QMessageBox, QWidget)
 
 from core import config
+from core.process_manager import reaper_project
 from core.voicemeeter_ctrl import DEFAULT_ROUTING, MixerLevels, MixerParams
 from ui import styles
 from ui.master_widget import MasterWidget
+from ui.project_dialog import ProjectDialog
 from ui.settings_dialog import SettingsDialog
 from ui.strip_widget import StripWidget
 from ui.vst_dialog import VstDialog
@@ -97,6 +100,7 @@ class MainWindow(QMainWindow):
         self._vm_ok = True
         self._reaper_ok = reaper.is_connected
         self._device_warned = False
+        self._tracks: list = reaper.strip_tracks   # piste REAPER de chaque strip (ou None)
 
         ui_cfg = cfg.setdefault("ui", {})
         self.setWindowTitle(config.APP_NAME)
@@ -124,6 +128,7 @@ class MainWindow(QMainWindow):
         self.master = MasterWidget()
         self.master.headphoneChanged.connect(vm.set_headphone_gain)
         self.master.settingsRequested.connect(self.open_settings)
+        self.master.projectRequested.connect(self.choose_project)
         layout.addWidget(self.master)
 
         self.toast = Toast(central)
@@ -135,11 +140,12 @@ class MainWindow(QMainWindow):
         reaper.tracks_changed.connect(self._on_tracks)
         reaper.connection_changed.connect(self._on_reaper_connection)
         reaper.device_changed.connect(self._on_device)
+        reaper.project_changed.connect(self._on_project)
         reaper.command_failed.connect(self.toast.show_message)
 
         self._refresh_status()
-        for strip in self.strips:
-            strip.set_reaper_available(self._reaper_ok)
+        self._on_tracks(self._tracks)
+        self._on_project(reaper.project_path)
         if reaper.device is not None:
             self._on_device(reaper.device)
 
@@ -178,8 +184,15 @@ class MainWindow(QMainWindow):
         self.master.set_levels(levels.master)
 
     def _on_tracks(self, tracks: list) -> None:
+        """tracks : la piste REAPER de chaque strip (None si aucune piste du
+        projet n'écoute ses canaux)."""
+        self._tracks = list(tracks)
+        create = bool(self._cfg.get("reaper", {}).get("manage_routing", True))
         for strip in self.strips:
-            strip.set_track(tracks[strip.index] if strip.index < len(tracks) else None)
+            track = tracks[strip.index] if strip.index < len(tracks) else None
+            strip.set_track(track)
+            strip.set_reaper_available(self._reaper_ok, track is not None or create)
+        self.update_inserts()
 
     def _on_vm_connection(self, ok: bool) -> None:
         self._vm_ok = ok
@@ -187,9 +200,27 @@ class MainWindow(QMainWindow):
 
     def _on_reaper_connection(self, ok: bool) -> None:
         self._reaper_ok = ok
-        for strip in self.strips:
-            strip.set_reaper_available(ok)
+        self._on_tracks(self._tracks)
         self._refresh_status()
+
+    def _on_project(self, path: str) -> None:
+        name = Path(path).stem if path else "…"
+        if path and Path(path).name.lower() == "session.rpp":
+            name = "Projet vierge"
+        self.master.set_project(name, path or "(en attente de REAPER)")
+
+    def update_inserts(self) -> None:
+        """Insert Voicemeeter activé seulement pour les strips dont la piste
+        REAPER traite vraiment le son (armée, écoutée, avec une sortie) et
+        quand REAPER tourne sur le pilote de l'insert : sinon la strip serait
+        muette. Tout le reste passe sans effets."""
+        manage = bool(self._cfg.get("voicemeeter", {}).get("manage_insert", True))
+        device = self._reaper.device
+        ready = (manage and self._reaper_ok and device is not None
+                 and device.is_voicemeeter_insert)
+        strips = {i for i, track in enumerate(self._tracks)
+                  if ready and track is not None and track.processes_live}
+        self._vm.set_inserts(strips)
 
     def _refresh_status(self) -> None:
         if not self._vm_ok:
@@ -204,7 +235,7 @@ class MainWindow(QMainWindow):
     def _on_device(self, device) -> None:
         manage = bool(self._cfg.get("voicemeeter", {}).get("manage_insert", True))
         is_insert = device.is_voicemeeter_insert
-        self._vm.set_inserts(manage and is_insert)
+        self.update_inserts()
         if manage and not is_insert and not self._device_warned:
             self._device_warned = True
             self.toast.show_message(
@@ -248,8 +279,27 @@ class MainWindow(QMainWindow):
             self._reaper.remove_fx(index, fx_index)
 
     def open_settings(self) -> None:
-        SettingsDialog(self._cfg, self._processes, self._reaper, self._vm, self,
-                       persist=self._persist).exec()
+        dialog = SettingsDialog(self._cfg, self._processes, self._reaper, self._vm, self,
+                                persist=self._persist)
+        dialog.optionsChanged.connect(lambda: self._on_tracks(self._tracks))
+        dialog.projectRequested.connect(self.choose_project)
+        dialog.exec()
+
+    def choose_project(self) -> None:
+        """Choix du projet REAPER ; il est ouvert tout de suite, sans redémarrer."""
+        dialog = ProjectDialog(self._cfg, current=self._reaper.project_path, parent=self)
+        if not dialog.exec():
+            return
+        self._save_config()
+        path = reaper_project(self._cfg, dialog.selected)
+        if path is None:
+            self.toast.show_message("Projet introuvable.")
+            return
+        current = self._reaper.project_path
+        if current and Path(current).resolve() == path.resolve():
+            return
+        self._reaper.open_project(path)
+        self.toast.show_message(f"Ouverture de « {path.stem} » dans REAPER…")
 
     # ------------------------------------------------------------ fermeture
     def closeEvent(self, event) -> None:  # noqa: N802

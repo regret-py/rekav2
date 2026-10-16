@@ -1,11 +1,11 @@
 """
-Configuration de REAPER Mixer : emplacements des fichiers et lecture/écriture
-de config.json.
+Configuration de REKA : emplacements des fichiers et lecture/écriture de
+config.json.
 
 - Le config.json livré avec l'application contient les valeurs par défaut.
   Une fois buildé avec PyInstaller (--onefile), il est extrait dans un dossier
   temporaire en lecture seule : on ne le modifie donc jamais.
-- La config de l'utilisateur vit dans %APPDATA%/REAPER Mixer/config.json.
+- La config de l'utilisateur vit dans %APPDATA%/REKA/config.json.
   Elle est créée au premier lancement, puis fusionnée avec les défauts à chaque
   démarrage : les nouvelles clés ajoutées par une mise à jour apparaissent
   toutes seules, sans écraser les réglages existants.
@@ -16,14 +16,16 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import sys
 import threading
 from pathlib import Path
 from typing import Any
 
-APP_NAME = "REAPER Mixer"
-APP_VERSION = "0.1.0"
+APP_NAME = "REKA"
+APP_VERSION = "0.2.0"
 CONFIG_FILENAME = "config.json"
+LEGACY_DIR_NAME = "REAPER Mixer"   # ancien nom de l'application (données reprises)
 
 log = logging.getLogger(__name__)
 
@@ -50,13 +52,24 @@ def resource_path(relative: str | Path) -> Path:
 
 
 def app_data_dir() -> Path:
-    """Dossier de données utilisateur : %APPDATA%/REAPER Mixer (créé si besoin).
+    """Dossier de données utilisateur : %APPDATA%/REKA (créé si besoin).
 
-    Hors Windows (dev uniquement), repli sur ~/.config/REAPER Mixer.
+    Au premier lancement sous ce nom, les données de l'ancien dossier
+    « REAPER Mixer » (config, projet de session…) sont reprises.
+    Hors Windows (dev uniquement), repli sur ~/.config/REKA.
     """
     base = os.environ.get("APPDATA")
     root = Path(base) if base else Path.home() / ".config"
     path = root / APP_NAME
+    if not path.exists():
+        legacy = root / LEGACY_DIR_NAME
+        if legacy.is_dir():
+            # Fichiers verrouillés ou temporaires de l'ancienne version : ignorés
+            try:
+                shutil.copytree(legacy, path, ignore=shutil.ignore_patterns(
+                    "instance.lock", "*.log", "*.log.*", "bridge"))
+            except OSError as exc:  # on repart d'un dossier neuf plutôt que d'échouer
+                log.warning("Reprise des données de %s impossible : %s", legacy, exc)
     path.mkdir(parents=True, exist_ok=True)
     return path
 

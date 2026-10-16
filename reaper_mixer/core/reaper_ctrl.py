@@ -1,5 +1,5 @@
 """
-Pilotage de REAPER à travers le pont Lua (assets/reaper_mixer_bridge.lua).
+Pilotage de REAPER à travers le pont Lua (assets/reka_bridge.lua).
 
 Pourquoi un pont plutôt que l'OSC natif de REAPER : l'OSC ne sait ni compter
 les effets d'une piste, ni insérer un plugin par son nom, et il faut l'activer
@@ -7,15 +7,17 @@ les effets d'une piste, ni insérer un plugin par son nom, et il faut l'activer
 (TrackFX_AddByName, TrackFX_Delete…) et ne demande aucun réglage.
 
 Fonctionnement :
-  - prepare_launch() copie le pont dans %APPDATA%/REAPER Mixer/bridge et
-    ajoute à Scripts/__startup.lua de REAPER un petit bloc qui le charge, mais
-    seulement si REAPER a été lancé par l'app (variable REAPER_MIXER_IPC) ;
-  - un thread lit state.txt (~20 fois/s) : pistes, effets, carte son, accusés
-    de réception, et sert de battement de cœur (REAPER connecté / déconnecté) ;
+  - prepare_launch() copie le pont dans %APPDATA%/REKA/bridge et ajoute à
+    Scripts/__startup.lua de REAPER un petit bloc qui le charge, mais
+    seulement si REAPER a été lancé par l'app (variable REKA_IPC) ;
+  - un thread lit state.txt (~20 fois/s) : projet, pistes, effets, carte son,
+    accusés de réception, et sert de battement de cœur (connecté / déconnecté) ;
   - les commandes sont numérotées et réécrites dans commands.txt tant que le
     pont n'en a pas accusé réception.
 
-Les pistes REAPER 0..5 correspondent aux strips 0..5 de l'interface.
+Strips ↔ pistes : la piste d'une strip est la première piste REAPER dont
+l'entrée commence sur le premier canal d'insert Voicemeeter de la strip. Ça
+marche avec n'importe quel projet de l'utilisateur, sans toucher à son câblage.
 """
 
 from __future__ import annotations
@@ -36,11 +38,13 @@ from core.voicemeeter_ctrl import DEFAULT_STRIP_MAP, input_channel
 
 log = logging.getLogger(__name__)
 
-BRIDGE_FILENAME = "reaper_mixer_bridge.lua"
-IPC_ENV = "REAPER_MIXER_IPC"
+BRIDGE_FILENAME = "reka_bridge.lua"
+IPC_ENV = "REKA_IPC"
 # ASCII uniquement : le fichier de l'utilisateur peut être dans n'importe quel encodage
-STARTUP_BEGIN = "-- >>> REAPER Mixer (bloc gere automatiquement, ne pas modifier)"
-STARTUP_END = "-- <<< REAPER Mixer"
+STARTUP_BEGIN = "-- >>> REKA (bloc gere automatiquement, ne pas modifier)"
+STARTUP_END = "-- <<< REKA"
+# Blocs posés par les versions précédentes (nom « REAPER Mixer ») : retirés
+LEGACY_STARTUP_MARKERS = (("-- >>> REAPER Mixer", "-- <<< REAPER Mixer"),)
 POLL_INTERVAL_S = 0.05
 HEARTBEAT_TIMEOUT_S = 3.0
 FXLIST_TIMEOUT_S = 15.0
@@ -71,6 +75,33 @@ class TrackInfo:
     name: str
     fx_enabled: bool   # chaîne d'effets active (I_FXEN)
     fx: tuple[FxInfo, ...]
+    index: int = 0
+    rec_input: int = -1    # I_RECINPUT brut (-1 = aucune entrée)
+    armed: bool = True
+    monitor: int = 1       # I_RECMON (0 = pas d'écoute de l'entrée)
+    hw_outputs: int = 1    # nombre de sorties matérielles
+
+    @property
+    def input_channel(self) -> int | None:
+        """Premier canal (0-based) écouté, ou None (pas d'entrée, entrée MIDI)."""
+        if self.rec_input < 0 or self.rec_input & 4096:
+            return None
+        return self.rec_input & 1023
+
+    @property
+    def processes_live(self) -> bool:
+        """Vrai si la piste traite l'entrée en direct et renvoie le son :
+        sans ça, activer l'insert Voicemeeter couperait la strip."""
+        return self.armed and self.monitor > 0 and self.hw_outputs > 0
+
+
+def strip_tracks(tracks: list[TrackInfo], channels: list[int]) -> list[TrackInfo | None]:
+    """Piste de chaque strip : la première dont l'entrée commence sur son canal
+    (même règle que find_track() dans le pont Lua)."""
+    result = []
+    for channel in channels:
+        result.append(next((t for t in tracks if t.input_channel == channel), None))
+    return result
 
 
 @dataclass(frozen=True)
@@ -103,6 +134,7 @@ class _BridgeState:
     device: AudioDevice | None
     tracks: list[TrackInfo]
     errors: list[tuple[int, str]]
+    project: str = ""
 
 
 def _escape(value: object) -> str:
@@ -128,7 +160,7 @@ def parse_state(text: str) -> _BridgeState | None:
         return None
     state = _BridgeState(n=n, session="", ack=0, version="", device=None, tracks=[], errors=[])
     fx_by_track: dict[int, list[FxInfo]] = {}
-    track_rows: list[tuple[int, str, bool]] = []
+    track_rows: list[dict] = []
     for line in lines[1:]:
         # « CLÉ<tab>champs… » pour les enregistrements, « CLÉ valeur » pour le reste
         key, _, rest = line.partition("\t")
@@ -142,10 +174,18 @@ def parse_state(text: str) -> _BridgeState | None:
                 state.ack = int(rest)
             elif key == "VERSION":
                 state.version = _unescape(rest)
+            elif key == "PROJECT":
+                state.project = fields[0]
             elif key == "DEVICE" and len(fields) >= 5:
                 state.device = AudioDevice(*fields[:5])
             elif key == "TRACK" and len(fields) >= 3:
-                track_rows.append((int(fields[0]), fields[1], fields[2] == "1"))
+                # index, nom, chaîne active, nb d'effets, entrée, armée, écoute, sorties
+                extra = [int(float(f)) for f in fields[4:8]] if len(fields) >= 8 else []
+                row = {"index": int(fields[0]), "name": fields[1], "fx_enabled": fields[2] == "1"}
+                if extra:
+                    row.update(rec_input=extra[0], armed=extra[1] != 0, monitor=extra[2],
+                               hw_outputs=extra[3])
+                track_rows.append(row)
             elif key == "FX" and len(fields) >= 5:
                 fx_by_track.setdefault(int(fields[0]), []).append(
                     FxInfo(name=fields[2], enabled=fields[3] == "1", open=fields[4] == "1"))
@@ -153,8 +193,8 @@ def parse_state(text: str) -> _BridgeState | None:
                 state.errors.append((int(fields[0]), fields[1]))
         except ValueError:
             log.debug("Ligne d'état ignorée : %r", line)
-    for index, name, fx_enabled in sorted(track_rows):
-        state.tracks.append(TrackInfo(name, fx_enabled, tuple(fx_by_track.get(index, []))))
+    for row in sorted(track_rows, key=lambda r: r["index"]):
+        state.tracks.append(TrackInfo(fx=tuple(fx_by_track.get(row["index"], [])), **row))
     return state
 
 
@@ -172,14 +212,18 @@ def reaper_resource_path(exe: Path | None, configured: str | None = None) -> Pat
 
 class ReaperController(QObject):
     connection_changed = Signal(bool)
-    tracks_changed = Signal(object)       # list[TrackInfo], une par strip
+    tracks_changed = Signal(object)       # list[TrackInfo | None], une entrée par strip
     device_changed = Signal(object)       # AudioDevice
+    project_changed = Signal(str)         # chemin du projet ouvert dans REAPER
     installed_fx_ready = Signal(object)   # list[(nom, ident)] ou None si indisponible
     command_failed = Signal(str)
 
     def __init__(self, cfg: dict, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._cfg = cfg
+        strip_map = cfg.get("voicemeeter", {}).get("strip_map", DEFAULT_STRIP_MAP)
+        # Une strip est désignée auprès du pont par son premier canal d'insert
+        self._channels = [input_channel(int(s)) for s in strip_map]
         self._ipc_dir = config.app_data_dir() / "bridge"
         self._session = uuid.uuid4().hex[:12]
         self._lock = threading.Lock()
@@ -197,8 +241,9 @@ class ReaperController(QObject):
         self._last_n: str | None = None
         self._last_beat = 0.0
         self._connected = False
-        self._tracks: list[TrackInfo] | None = None
+        self._tracks: list[TrackInfo | None] | None = None
         self._device: AudioDevice | None = None
+        self._project = ""
         self._seen_errors: set[int] = set()
         self._fx_request: tuple[str, float] | None = None
         self._installed_fx: list[tuple[str, str]] | None = None
@@ -222,6 +267,15 @@ class ReaperController(QObject):
     def installed_fx(self) -> list[tuple[str, str]] | None:
         return self._installed_fx
 
+    @property
+    def project_path(self) -> str:
+        """Projet ouvert dans REAPER (vide tant que REAPER n'a pas répondu)."""
+        return self._project
+
+    @property
+    def strip_tracks(self) -> list[TrackInfo | None]:
+        return list(self._tracks or [None] * len(self._channels))
+
     def resource_path(self, exe: Path | None) -> Path:
         return reaper_resource_path(exe, self._cfg.get("reaper", {}).get("resource_path"))
 
@@ -238,10 +292,10 @@ class ReaperController(QObject):
 
     # ----------------------------------------------------------- connexion
     def start(self) -> None:
-        """Démarre la lecture de l'état et programme la configuration des pistes."""
+        """Démarre la lecture de l'état ; les pistes sans nom prennent celui de leur strip."""
         if self._thread is not None and self._thread.is_alive():
             return
-        self._queue_track_setup()
+        self._queue_names()
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, name="reaper-bridge", daemon=True)
         self._thread.start()
@@ -261,23 +315,33 @@ class ReaperController(QObject):
             self._thread.join(timeout=2.0)
 
     # ------------------------------------------------------ commandes (UI)
+    # Les strips sont désignées par leur canal : le pont retrouve leur piste.
     def rename_track(self, strip: int, name: str) -> None:
-        self._send("rename", strip, name)
+        self._send("rename", self._channels[strip], name)
 
     def add_fx(self, strip: int, fx_name: str) -> None:
-        self._send("add_fx", strip, fx_name)
+        """Ajoute un plugin ; si la strip n'a pas de piste, le pont en crée une
+        (câblée sur son insert) quand reaper.manage_routing est activé."""
+        create = bool(self._cfg.get("reaper", {}).get("manage_routing", True))
+        self._send("add_fx", self._channels[strip], self._strip_name(strip), int(create), fx_name)
 
     def remove_fx(self, strip: int, fx_index: int) -> None:
-        self._send("remove_fx", strip, fx_index)
+        self._send("remove_fx", self._channels[strip], fx_index)
 
     def set_fx_enabled(self, strip: int, fx_index: int, enabled: bool) -> None:
-        self._send("fx_enabled", strip, fx_index, int(enabled))
+        self._send("fx_enabled", self._channels[strip], fx_index, int(enabled))
 
     def set_chain_enabled(self, strip: int, enabled: bool) -> None:
-        self._send("chain_enabled", strip, int(enabled))
+        self._send("chain_enabled", self._channels[strip], int(enabled))
 
     def toggle_fx_ui(self, strip: int, fx_index: int) -> None:
-        self._send("open_fx", strip, fx_index)
+        self._send("open_fx", self._channels[strip], fx_index)
+
+    def open_project(self, path: str | Path) -> None:
+        """Sauvegarde le projet en cours puis ouvre `path` dans REAPER, à chaud."""
+        log.info("Ouverture du projet REAPER : %s", path)
+        self._send("open_project", str(path))
+        self._queue_names()
 
     def save_project(self) -> None:
         self._send("save")
@@ -292,18 +356,13 @@ class ReaperController(QObject):
             self._fx_request = (request, time.monotonic())
         self._send("list_fx", request)
 
-    def _queue_track_setup(self) -> None:
-        section = self._cfg.get("reaper", {})
-        manage = bool(section.get("manage_routing", True))
+    def _strip_name(self, strip: int) -> str:
         names = self._cfg.get("ui", {}).get("strip_names", [])
-        strip_map = self._cfg.get("voicemeeter", {}).get("strip_map", DEFAULT_STRIP_MAP)
-        self._send("tracks", len(strip_map))
-        for index, vm_strip in enumerate(strip_map):
-            name = names[index] if index < len(names) else f"Strip {index + 1}"
-            channel = input_channel(int(vm_strip))
-            # Insert Voicemeeter : la paire de canaux d'une strip est la même en
-            # entrée et en sortie du driver ASIO.
-            self._send("track_setup", index, name, channel, channel, int(manage))
+        return names[strip] if strip < len(names) else f"Strip {strip + 1}"
+
+    def _queue_names(self) -> None:
+        for strip, channel in enumerate(self._channels):
+            self._send("ensure_name", channel, self._strip_name(strip))
 
     def _send(self, verb: str, *args: object) -> int:
         with self._lock:
@@ -391,9 +450,14 @@ class ReaperController(QObject):
             self._device = state.device
             log.info("Carte son de REAPER : %s", state.device.describe())
             self.device_changed.emit(state.device)
-        if state.tracks != self._tracks:
-            self._tracks = state.tracks
-            self.tracks_changed.emit(list(state.tracks))
+        if state.project != self._project:
+            self._project = state.project
+            log.info("Projet REAPER ouvert : %s", state.project or "(sans fichier)")
+            self.project_changed.emit(state.project)
+        tracks = strip_tracks(state.tracks, self._channels)
+        if tracks != self._tracks:
+            self._tracks = tracks
+            self.tracks_changed.emit(list(tracks))
         self._ready.set()
 
     def _read_fxlist(self) -> None:
@@ -489,10 +553,14 @@ def install_startup_hook(resource_path: Path) -> Path:
 
 
 def remove_startup_block(text: str) -> str:
-    start = text.find(STARTUP_BEGIN)
-    if start < 0:
-        return text
-    end = text.find(STARTUP_END, start)
-    if end < 0:
-        return text[:start]
-    return text[:start] + text[end + len(STARTUP_END):].lstrip("\n")
+    """Retire notre bloc, et ceux posés par les anciennes versions de l'app."""
+    for begin, end_marker in ((STARTUP_BEGIN, STARTUP_END), *LEGACY_STARTUP_MARKERS):
+        start = text.find(begin)
+        if start < 0:
+            continue
+        end = text.find(end_marker, start + len(begin))
+        if end < 0:
+            text = text[:start]
+        else:
+            text = text[:start] + text[end + len(end_marker):].lstrip("\n")
+    return text

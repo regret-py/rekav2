@@ -21,6 +21,7 @@ import math
 import threading
 import time
 from dataclasses import dataclass
+from typing import Iterable
 
 from PySide6.QtCore import QObject, Signal
 
@@ -111,7 +112,7 @@ class VoicemeeterController(QObject):
         self._logged_in = False
         self._lock = threading.Lock()
         self._writes: dict[str, float | str] = {}
-        self._inserts_wanted: bool | None = None
+        self._inserts_wanted: frozenset[int] | None = None
         # Utilisés seulement par le thread de scrutation (puis par close())
         self._echo: dict[str, tuple[float, float | str]] = {}
         self._inserts_saved: dict[int, float] = {}
@@ -169,7 +170,7 @@ class VoicemeeterController(QObject):
             return
         try:
             self._flush()                 # derniers mouvements de l'utilisateur
-            self._apply_inserts(False)
+            self._apply_inserts(frozenset())
         except Exception as exc:
             log.warning("Voicemeeter : derniers réglages non envoyés : %s", exc)
 
@@ -215,11 +216,11 @@ class VoicemeeterController(QObject):
     def set_headphone_gain(self, db: float) -> None:
         self._queue(f"Bus[{self._headphone_bus}].Gain", _clamp_gain(db))
 
-    def set_inserts(self, enabled: bool) -> None:
-        """Active (ou rend) l'insert Voicemeeter des strips pilotées : leur son
-        passe alors par REAPER, et donc par les effets."""
+    def set_inserts(self, strips: Iterable[int]) -> None:
+        """Active l'insert Voicemeeter des strips données (leur son passe alors
+        par REAPER, donc par les effets) et rend les autres à leur état d'origine."""
         with self._lock:
-            self._inserts_wanted = enabled
+            self._inserts_wanted = frozenset(strips)
 
     def apply_state(self, state: dict) -> None:
         """Ré-applique un état sauvegardé par MixerParams.to_state()."""
@@ -324,23 +325,26 @@ class VoicemeeterController(QObject):
                   amp_to_db(get_level(LEVEL_OUTPUT, base + 1)))
         self.levels_changed.emit(MixerLevels(tuple(strips), master))
 
-    def _apply_inserts(self, enabled: bool) -> None:
-        changed = False
-        for vm_strip in self._strips:
+    def _apply_inserts(self, wanted: frozenset[int]) -> None:
+        """Insert activé pour les strips UI de `wanted` ; les autres retrouvent
+        la valeur qu'elles avaient avant que l'app n'y touche."""
+        for index, vm_strip in enumerate(self._strips):
             first = input_channel(vm_strip)
+            enable = index in wanted
+            changed = False
             for channel in (first, first + 1):
                 param = f"patch.insert[{channel}]"
-                if enabled:
+                if enable:
                     if channel not in self._inserts_saved:
                         self._inserts_saved[channel] = float(self._remote.get(param))
-                    self._remote.set(param, 1.0)
-                    changed = True
+                        self._remote.set(param, 1.0)
+                        changed = True
                 elif channel in self._inserts_saved:
                     self._remote.set(param, self._inserts_saved.pop(channel))
                     changed = True
-        if changed:
-            log.info("Insert Voicemeeter %s pour les strips pilotées.",
-                     "activé" if enabled else "rendu à son état d'origine")
+            if changed:
+                log.info("Insert Voicemeeter de la strip %d (VM %d) %s.", index, vm_strip,
+                         "activé" if enable else "rendu à son état d'origine")
 
     def _set_connected(self, connected: bool) -> None:
         if connected != self._connected:

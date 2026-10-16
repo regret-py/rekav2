@@ -1,21 +1,26 @@
 --[[
-  REAPER Mixer — pont entre l'application et REAPER.
+  REKA — pont entre l'application et REAPER.
 
   Chargé au démarrage de REAPER par Scripts/__startup.lua, uniquement quand
-  REAPER est lancé par REAPER Mixer (variable d'environnement REAPER_MIXER_IPC).
+  REAPER est lancé par REKA (variable d'environnement REKA_IPC).
   Lancé à la main, REAPER n'exécute rien de ce fichier.
 
-  Échanges par fichiers texte dans le dossier REAPER_MIXER_IPC :
+  Échanges par fichiers texte dans le dossier REKA_IPC :
     commands.txt  écrit par l'app   : commandes numérotées
-    state.txt     écrit par le pont : pistes, effets, carte son, accusés (~5 fois/s)
+    state.txt     écrit par le pont : projet, pistes, effets, carte son, accusés (~5 fois/s)
     fxlist.txt    écrit par le pont : plugins installés, sur demande
   Une ligne par enregistrement, champs séparés par des tabulations,
   « \ », tabulation et retour à la ligne échappés en \\, \t, \n.
   Chaque fichier se termine par « END <n> » : un fichier lu pendant son
   écriture est simplement ignoré jusqu'au tour suivant.
+
+  Une strip de l'app est désignée par son premier canal d'insert Voicemeeter :
+  sa piste est la première piste REAPER dont l'entrée commence sur ce canal.
+  Le câblage des pistes existantes n'est jamais modifié ; une piste n'est
+  créée que lorsqu'on ajoute un effet à une strip qui n'en a pas.
 ]]
 
-local DIR = os.getenv("REAPER_MIXER_IPC")
+local DIR = os.getenv("REKA_IPC")
 if not DIR or DIR == "" then return end
 DIR = DIR:gsub("\\", "/"):gsub("/+$", "")
 
@@ -77,45 +82,56 @@ local function add_error(seq, message)
 end
 
 -- ----------------------------------------------------------------- projet
-local function track(index)
-  local tr = reaper.GetTrack(0, tonumber(index))
-  if not tr then error("piste " .. tostring(index) .. " introuvable", 0) end
-  return tr
-end
-
-local function ensure_tracks(count)
-  count = tonumber(count)
-  while reaper.CountTracks(0) < count do
-    reaper.InsertTrackAtIndex(reaper.CountTracks(0), true)
-  end
+local function project_path()
+  local _, path = reaper.EnumProjects(-1)
+  return path or ""
 end
 
 local function save_project()
   -- Un projet sans fichier ouvrirait « Enregistrer sous » (invisible) : on évite
-  local _, path = reaper.EnumProjects(-1)
-  if path and path ~= "" then reaper.Main_SaveProject(0, false) end
+  if project_path() ~= "" then reaper.Main_SaveProject(0, false) end
 end
 
--- Nomme la piste et, si demandé, la câble pour traiter en direct l'insert
--- Voicemeeter : entrée stéréo in_ch → effets → sortie matérielle out_ch.
-local function setup_track(index, name, in_ch, out_ch, manage)
-  ensure_tracks(index + 1)
-  local tr = track(index)
+-- Premier canal (0-based) écouté par une piste, ou nil (pas d'entrée, MIDI)
+local function input_channel(tr)
+  local v = math.floor(reaper.GetMediaTrackInfo_Value(tr, "I_RECINPUT"))
+  if v < 0 or v & 4096 ~= 0 then return nil end
+  return v & 1023
+end
+
+local function find_track(channel)
+  channel = tonumber(channel)
+  for t = 0, reaper.CountTracks(0) - 1 do
+    local tr = reaper.GetTrack(0, t)
+    if input_channel(tr) == channel then return tr end
+  end
+  return nil
+end
+
+local function strip_track(channel)
+  local tr = find_track(channel)
+  if not tr then error("aucune piste REAPER n'écoute les canaux de cette strip", 0) end
+  return tr
+end
+
+-- Nouvelle piste câblée sur l'insert Voicemeeter : entrée stéréo `channel`
+-- → effets → sortie matérielle sur la même paire de canaux.
+local function create_track(channel, name)
+  channel = tonumber(channel)
+  local index = reaper.CountTracks(0)
+  reaper.InsertTrackAtIndex(index, true)
+  local tr = reaper.GetTrack(0, index)
   reaper.GetSetMediaTrackInfo_String(tr, "P_NAME", name, true)
-  if manage ~= "1" then return end
-  reaper.SetMediaTrackInfo_Value(tr, "I_RECINPUT", 1024 + tonumber(in_ch))  -- 1024 = stéréo
+  reaper.SetMediaTrackInfo_Value(tr, "I_RECINPUT", 1024 + channel)  -- 1024 = stéréo
   reaper.SetMediaTrackInfo_Value(tr, "I_RECMODE", 2)     -- aucun enregistrement
   reaper.SetMediaTrackInfo_Value(tr, "I_RECMON", 1)      -- écoute de l'entrée
   reaper.SetMediaTrackInfo_Value(tr, "I_RECARM", 1)
   reaper.SetMediaTrackInfo_Value(tr, "B_MAINSEND", 0)    -- pas d'envoi au master
-  local send = 0
-  if reaper.GetTrackNumSends(tr, 1) == 0 then
-    send = reaper.CreateTrackSend(tr, nil)              -- nil = sortie matérielle
-  end
+  local send = reaper.CreateTrackSend(tr, nil)          -- nil = sortie matérielle
   reaper.SetTrackSendInfo_Value(tr, 1, send, "I_SRCCHAN", 0)
-  reaper.SetTrackSendInfo_Value(tr, 1, send, "I_DSTCHAN", tonumber(out_ch))
+  reaper.SetTrackSendInfo_Value(tr, 1, send, "I_DSTCHAN", channel)
   reaper.SetTrackSendInfo_Value(tr, 1, send, "D_VOL", 1.0)
-  reaper.SetTrackSendInfo_Value(tr, 1, send, "B_MUTE", 0)
+  return tr
 end
 
 local function write_fxlist(request)
@@ -137,32 +153,47 @@ end
 
 -- -------------------------------------------------------------- commandes
 local HANDLERS = {
-  tracks = function(a) ensure_tracks(a[1]) end,
-  track_setup = function(a) setup_track(tonumber(a[1]), a[2], a[3], a[4], a[5]) end,
-  rename = function(a)
-    reaper.GetSetMediaTrackInfo_String(track(a[1]), "P_NAME", a[2], true)
+  -- Donne le nom de la strip à sa piste si celle-ci n'a pas encore de nom
+  ensure_name = function(a)
+    local tr = find_track(a[1])
+    if not tr then return end
+    local _, name = reaper.GetSetMediaTrackInfo_String(tr, "P_NAME", "", false)
+    if name == "" then reaper.GetSetMediaTrackInfo_String(tr, "P_NAME", a[2], true) end
   end,
-  add_fx = function(a)
-    if reaper.TrackFX_AddByName(track(a[1]), a[2], false, -1) < 0 then
-      error("REAPER ne trouve pas le plugin « " .. a[2] .. " »", 0)
+  rename = function(a)
+    local tr = find_track(a[1])
+    if tr then reaper.GetSetMediaTrackInfo_String(tr, "P_NAME", a[2], true) end
+  end,
+  add_fx = function(a)  -- canal, nom de la strip, création autorisée (1/0), plugin
+    local tr = find_track(a[1])
+    if not tr then
+      if a[3] ~= "1" then strip_track(a[1]) end  -- lève l'erreur explicite
+      tr = create_track(a[1], a[2])
+    end
+    if reaper.TrackFX_AddByName(tr, a[4], false, -1) < 0 then
+      error("REAPER ne trouve pas le plugin « " .. a[4] .. " »", 0)
     end
     save_project()
   end,
   remove_fx = function(a)
-    reaper.TrackFX_Delete(track(a[1]), tonumber(a[2]))
+    reaper.TrackFX_Delete(strip_track(a[1]), tonumber(a[2]))
     save_project()
   end,
   fx_enabled = function(a)
-    reaper.TrackFX_SetEnabled(track(a[1]), tonumber(a[2]), a[3] == "1")
+    reaper.TrackFX_SetEnabled(strip_track(a[1]), tonumber(a[2]), a[3] == "1")
     save_project()
   end,
   chain_enabled = function(a)
-    reaper.SetMediaTrackInfo_Value(track(a[1]), "I_FXEN", a[2] == "1" and 1 or 0)
+    reaper.SetMediaTrackInfo_Value(strip_track(a[1]), "I_FXEN", a[2] == "1" and 1 or 0)
     save_project()
   end,
   open_fx = function(a)  -- bascule la fenêtre flottante du plugin
-    local tr, fx = track(a[1]), tonumber(a[2])
+    local tr, fx = strip_track(a[1]), tonumber(a[2])
     reaper.TrackFX_Show(tr, fx, reaper.TrackFX_GetOpen(tr, fx) and 2 or 3)
+  end,
+  open_project = function(a)
+    save_project()
+    reaper.Main_openProject("noprompt:" .. a[1])
   end,
   save = function() save_project() end,
   list_fx = function(a) write_fxlist(a[1]) end,
@@ -218,14 +249,22 @@ local function build_state()
     "SESSION " .. (session or "-"),
     "ACK " .. last_seq,
     "VERSION " .. escape(reaper.GetAppVersion()),
+    "PROJECT\t" .. escape(project_path()),
   }
   out[#out + 1] = device_line()
   for t = 0, reaper.CountTracks(0) - 1 do
     local tr = reaper.GetTrack(0, t)
     local _, name = reaper.GetSetMediaTrackInfo_String(tr, "P_NAME", "", false)
     local count = reaper.TrackFX_GetCount(tr)
-    local chain_on = reaper.GetMediaTrackInfo_Value(tr, "I_FXEN") ~= 0
-    out[#out + 1] = table.concat({ "TRACK", t, escape(name), chain_on and 1 or 0, count }, "\t")
+    out[#out + 1] = table.concat({
+      "TRACK", t, escape(name),
+      reaper.GetMediaTrackInfo_Value(tr, "I_FXEN") ~= 0 and 1 or 0,
+      count,
+      math.floor(reaper.GetMediaTrackInfo_Value(tr, "I_RECINPUT")),
+      math.floor(reaper.GetMediaTrackInfo_Value(tr, "I_RECARM")),
+      math.floor(reaper.GetMediaTrackInfo_Value(tr, "I_RECMON")),
+      reaper.GetTrackNumSends(tr, 1),
+    }, "\t")
     for i = 0, count - 1 do
       local _, fx_name = reaper.TrackFX_GetFXName(tr, i, "")
       out[#out + 1] = table.concat({

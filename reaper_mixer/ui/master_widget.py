@@ -131,8 +131,54 @@ class ConnectionBadge(QWidget):
         p.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, text)
 
 
+class ProjectButton(QAbstractButton):
+    """Pill « Projet : <nom> » : ouvre le choix du projet REAPER."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._name = "…"
+        self.setFixedHeight(22)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def set_project(self, name: str, path: str) -> None:
+        self._name = name
+        self.setToolTip(f"Projet REAPER ouvert :\n{path}\n\nClic : changer de projet")
+        self.update()
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(0.5, 0.5, self.width() - 1, self.height() - 1)
+        hover = self.underMouse()
+        p.setPen(QPen(QColor(styles.GREEN_DIM if hover else styles.BORDER_COLUMN), 1))
+        p.setBrush(QColor(styles.BUTTON_HOVER if hover else "#030b06"))
+        p.drawRoundedRect(rect, rect.height() / 2, rect.height() / 2)
+        # Petite icône de dossier
+        p.setPen(QPen(QColor(styles.TEXT_SECONDARY), 1.2))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        folder = QRectF(8, rect.center().y() - 3.5, 9, 7)
+        p.drawRoundedRect(folder, 1.2, 1.2)
+        p.drawLine(QPointF(folder.left() + 1, folder.top()), QPointF(folder.left() + 3.5, folder.top() - 1.5))
+        p.setFont(styles.font(10, QFont.Weight.DemiBold))
+        p.setPen(QColor(styles.TEXT_PRIMARY if hover else styles.TEXT_SECONDARY))
+        text_rect = rect.adjusted(22, 0, -8, 0)
+        text = p.fontMetrics().elidedText(self._name, Qt.TextElideMode.ElideRight,
+                                          int(text_rect.width()))
+        p.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, text)
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self.update()
+        super().leaveEvent(event)
+
+
 class MasterWidget(QFrame):
     settingsRequested = Signal()
+    projectRequested = Signal()
     headphoneChanged = Signal(float)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -157,6 +203,9 @@ class MasterWidget(QFrame):
 
         self.badge = ConnectionBadge()
         layout.addWidget(self.badge)
+        self.project = ProjectButton()
+        self.project.clicked.connect(self.projectRequested)
+        layout.addWidget(self.project)
 
         knob_section = make_section()
         knob_box = QVBoxLayout(knob_section)
@@ -198,6 +247,9 @@ class MasterWidget(QFrame):
 
     def set_status(self, ok: bool, text: str, detail: str = "") -> None:
         self.badge.set_status(ok, text, detail)
+
+    def set_project(self, name: str, path: str) -> None:
+        self.project.set_project(name, path)
 
     def _on_knob(self, db: float) -> None:
         self._show_value(db)

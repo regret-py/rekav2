@@ -2,14 +2,14 @@
 Gestion des processus Voicemeeter et REAPER : recherche, lancement, masquage
 et arrêt.
 
-L'utilisateur ne doit voir que REAPER Mixer : les deux moteurs tournent avec
+L'utilisateur ne doit voir que REKA : les deux moteurs tournent avec
 leur fenêtre principale masquée (ShowWindow SW_HIDE). Un chien de garde
 re-masque ces fenêtres si un moteur les ré-affiche de lui-même. Seules les
 fenêtres *principales* sont visées : les fenêtres de plugins VST ouvertes
 depuis l'app restent visibles.
 
 Qui arrête quoi à la fermeture :
-  - un processus lancé par REAPER Mixer (ou resté orphelin après un plantage,
+  - un processus lancé par REKA (ou resté orphelin après un plantage,
     reconnu grâce à processes.json) est arrêté si terminate_on_exit = true ;
   - un Voicemeeter déjà ouvert par l'utilisateur est seulement « emprunté » :
     masqué pendant la session, puis ré-affiché en partant ;
@@ -170,7 +170,7 @@ class AppNotInstalledError(ProcessManagerError):
 
 class ProcessConflictError(ProcessManagerError):
     def __init__(self, spec: AppSpec, pid: int) -> None:
-        super().__init__(f"{spec.name} est déjà ouvert en dehors de REAPER Mixer (PID {pid}).")
+        super().__init__(f"{spec.name} est déjà ouvert en dehors de REKA (PID {pid}).")
         self.hint = f"Ferme {spec.name}, puis clique sur « Réessayer »."
 
 
@@ -180,6 +180,38 @@ class ProcessStartError(ProcessManagerError):
 
 class StartupAborted(Exception):
     """Le démarrage a été interrompu (fermeture de l'app pendant le lancement)."""
+
+
+# --------------------------------------------------------------------------- #
+# Projet REAPER
+# --------------------------------------------------------------------------- #
+def blank_project(cfg: dict) -> Path | None:
+    """Projet vierge de REKA (6 pistes câblées, aucun effet) : copié depuis le
+    template au premier besoin, puis réutilisé (ses effets sont conservés)."""
+    project = config.app_data_dir() / SESSION_PROJECT_NAME
+    if project.is_file():
+        return project
+    template = config.resolve_path(cfg.get("reaper", {}).get("template"))
+    if template is None or not template.is_file():
+        log.warning("Template REAPER introuvable (%s) : REAPER démarre sans projet.", template)
+        return None
+    project.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(template, project)
+    log.info("Projet vierge créé depuis le template : %s", project)
+    return project
+
+
+def reaper_project(cfg: dict, choice: str | None = None) -> Path | None:
+    """Projet à ouvrir : `choice` s'il est donné, sinon le projet par défaut
+    (reaper.project). Vide = projet vierge de REKA. Un projet introuvable
+    (déplacé, supprimé) est remplacé par le projet vierge."""
+    wanted = cfg.get("reaper", {}).get("project", "") if choice is None else choice
+    path = config.resolve_path(wanted, base=config.app_data_dir())
+    if path is not None:
+        if path.is_file():
+            return path
+        log.warning("Projet REAPER introuvable (%s) : ouverture du projet vierge.", path)
+    return blank_project(cfg)
 
 
 # --------------------------------------------------------------------------- #
@@ -360,14 +392,16 @@ class ProcessManager:
         kind = self._cfg.get("voicemeeter", {}).get("kind", "potato")
         self._start(voicemeeter_spec(kind), args=[])
 
-    def start_reaper(self, prepare: Callable[[Path], dict[str, str]] | None = None) -> None:
-        """Lance REAPER sur le projet de session.
+    def start_reaper(self, prepare: Callable[[Path], dict[str, str]] | None = None,
+                     project: str | None = None) -> None:
+        """Lance REAPER sur un projet : `project` s'il est donné ("" = projet
+        vierge de REKA), sinon le projet par défaut de la config.
 
         `prepare(exe)` est appelé avant le lancement avec le chemin de reaper.exe
         (installation du pont Lua) et renvoie des variables d'environnement à
         transmettre au processus."""
-        project = self._prepare_reaper_project()
-        args = ["-nosplash"] + ([str(project)] if project else [])
+        path = reaper_project(self._cfg, project)
+        args = ["-nosplash"] + ([str(path)] if path else [])
         self._start(REAPER_SPEC, args=args, prepare=prepare)
 
     def executable(self, key: str) -> Path | None:
@@ -552,24 +586,6 @@ class ProcessManager:
         # Pas bloquant : la vraie vérification est la connexion (API / pont) qui suit,
         # et le chien de garde masquera la fenêtre dès qu'elle apparaîtra.
         log.warning("%s : fenêtre principale introuvable après %.0f s.", name, timeout_s)
-
-    def _prepare_reaper_project(self) -> Path | None:
-        """Projet de session persistant : copié depuis le template au premier
-        lancement, puis réutilisé (les chaînes d'effets sont conservées)."""
-        section = self._section("reaper")
-        project = (config.resolve_path(section.get("project"), base=config.app_data_dir())
-                   or config.app_data_dir() / SESSION_PROJECT_NAME)
-        if project.is_file():
-            return project
-        template = config.resolve_path(section.get("template"))
-        if template is None or not template.is_file():
-            log.warning("Template REAPER introuvable (%s) : REAPER démarre "
-                        "sans projet de session.", template)
-            return None
-        project.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(template, project)
-        log.info("Projet de session créé depuis le template : %s", project)
-        return project
 
     # ---------------------------------------------------------- surveillance
     def _ensure_watchdog(self) -> None:

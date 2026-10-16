@@ -1,10 +1,11 @@
 """
-REAPER Mixer — point d'entrée.
+REKA — point d'entrée.
 
 Séquence de démarrage :
   1. Lecture de config.json (défauts + copie utilisateur dans %APPDATA%)
+     et, si demandé, choix du projet REAPER à ouvrir
   2. Lancement + masquage de Voicemeeter Potato
-  3. Installation du pont Lua, puis lancement + masquage de REAPER
+  3. Installation du pont Lua, puis lancement + masquage de REAPER sur le projet
   4. Login à l'API Remote de Voicemeeter (nouvel essai toutes les 5 s)
   5. Attente du pont REAPER (battement de cœur)
   6. Affichage de la fenêtre principale
@@ -53,14 +54,14 @@ LOG_BACKUPS = 3
 BRIDGE_PING_TIMEOUT_S = 1.0  # attente d'un battement de cœur du pont
 BRIDGE_RETRY_S = 0.5         # pause entre deux attentes
 STARTUP_CANCEL_WAIT_MS = 5000
-WINDOWS_APP_ID = "ReaperMixer.Console"
+WINDOWS_APP_ID = "REKA.Console"
 
 
 # --------------------------------------------------------------------------- #
 # Journalisation et erreurs non gérées
 # --------------------------------------------------------------------------- #
 def setup_logging() -> Path:
-    """Logs dans %APPDATA%/REAPER Mixer/app.log (rotation 3 × 2 Mo)."""
+    """Logs dans %APPDATA%/REKA/app.log (rotation 3 × 2 Mo)."""
     log_path = config.app_data_dir() / "app.log"
     formatter = logging.Formatter(LOG_FORMAT)
     root = logging.getLogger()
@@ -135,9 +136,10 @@ def set_windows_app_id() -> None:
 # Écran de chargement
 # --------------------------------------------------------------------------- #
 class SplashScreen(QSplashScreen):
-    """Affiché pendant le lancement des moteurs audio."""
+    """Logo REKA affiché pendant le lancement des moteurs audio."""
 
-    WIDTH, HEIGHT = 460, 220
+    WIDTH, HEIGHT = 540, 310
+    LOGO_HEIGHT = 268
 
     def __init__(self) -> None:
         super().__init__(self._render())
@@ -147,7 +149,7 @@ class SplashScreen(QSplashScreen):
 
     def set_status(self, text: str) -> None:
         self.showMessage(text, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter,
-                         QColor(styles.GREEN_LABEL))
+                         QColor(styles.TEXT_SECONDARY))
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 (API Qt)
         # Un clic ferme un QSplashScreen par défaut : on l'ignore, sinon
@@ -160,26 +162,37 @@ class SplashScreen(QSplashScreen):
         ratio = screen.devicePixelRatio() if screen else 1.0
         pixmap = QPixmap(round(cls.WIDTH * ratio), round(cls.HEIGHT * ratio))
         pixmap.setDevicePixelRatio(ratio)
-        pixmap.fill(QColor(styles.BG_BLACK))
+        pixmap.fill(QColor("#0c1013"))
 
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QColor(styles.GREEN_DIM))
-        painter.drawRoundedRect(QRectF(0.5, 0.5, cls.WIDTH - 1, cls.HEIGHT - 1), 6, 6)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        logo = QPixmap(str(config.resource_path("assets/reka_logo.png")))
+        if not logo.isNull():
+            logo = logo.scaledToHeight(round(cls.LOGO_HEIGHT * ratio),
+                                       Qt.TransformationMode.SmoothTransformation)
+            logo.setDevicePixelRatio(ratio)
+            width = logo.width() / ratio
+            painter.drawPixmap(QRectF((cls.WIDTH - width) / 2, 0, width, cls.LOGO_HEIGHT),
+                               logo, QRectF(logo.rect()))
+        else:  # ressource manquante : simple titre
+            title_font = QApplication.font()
+            title_font.setPixelSize(40)
+            painter.setFont(title_font)
+            painter.setPen(QColor(styles.GREEN_NEON))
+            painter.drawText(QRectF(0, 0, cls.WIDTH, cls.LOGO_HEIGHT),
+                             Qt.AlignmentFlag.AlignCenter, config.APP_NAME)
 
-        title_font = QApplication.font()
-        title_font.setPixelSize(28)
-        painter.setFont(title_font)
-        painter.setPen(QColor(styles.GREEN_NEON))
-        painter.drawText(QRectF(0, 60, cls.WIDTH, 40), Qt.AlignmentFlag.AlignCenter,
-                         config.APP_NAME)
-
-        sub_font = QApplication.font()
-        sub_font.setPixelSize(11)
-        painter.setFont(sub_font)
-        painter.setPen(QColor(styles.GREEN_LABEL))
-        painter.drawText(QRectF(0, 100, cls.WIDTH, 20), Qt.AlignmentFlag.AlignCenter,
+        version_font = QApplication.font()
+        version_font.setPixelSize(10)
+        painter.setFont(version_font)
+        painter.setPen(QColor(styles.TEXT_MUTED))
+        painter.drawText(QRectF(0, 8, cls.WIDTH - 12, 16),
+                         Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop,
                          f"v{config.APP_VERSION}")
+        painter.setPen(QColor(styles.BORDER_COLUMN))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(QRectF(0.5, 0.5, cls.WIDTH - 1, cls.HEIGHT - 1), 8, 8)
         painter.end()
         return pixmap
 
@@ -205,12 +218,14 @@ class StartupWorker(QThread):
     succeeded = Signal()
 
     def __init__(self, cfg: dict, processes: ProcessManager,
-                 vm: VoicemeeterController, reaper: ReaperController) -> None:
+                 vm: VoicemeeterController, reaper: ReaperController,
+                 project: str | None = None) -> None:
         super().__init__()
         self._cfg = cfg
         self._processes = processes
         self._vm = vm
         self._reaper = reaper
+        self._project = project       # None = projet par défaut de la config
         self._cancel = threading.Event()
 
     def cancel(self) -> None:
@@ -240,7 +255,7 @@ class StartupWorker(QThread):
         self._processes.start_voicemeeter()
 
         self.progress.emit("Lancement de REAPER…")
-        self._processes.start_reaper(prepare=self._reaper.prepare_launch)
+        self._processes.start_reaper(prepare=self._reaper.prepare_launch, project=self._project)
 
         self.progress.emit("Connexion à Voicemeeter…")
         self._retry("l'API Remote de Voicemeeter", self._vm.login,
@@ -259,7 +274,7 @@ class StartupWorker(QThread):
 
     def _ping_reaper(self) -> None:
         if not self._reaper.ping(timeout_s=BRIDGE_PING_TIMEOUT_S):
-            raise TimeoutError("le pont REAPER Mixer ne répond pas encore")
+            raise TimeoutError("le pont REKA ne répond pas encore")
 
     def _retry(self, what: str, action: Callable[[], object], *,
                timeout_s: float, interval_s: float, hint: str = "") -> None:
@@ -297,16 +312,30 @@ class MixerApp:
         self._splash = SplashScreen()
         self._worker: StartupWorker | None = None
         self._window: MainWindow | None = None
+        self._project: str | None = None   # None = projet par défaut
         self._stopped = False
 
     def start(self) -> None:
+        if self._cfg.get("reaper", {}).get("ask_project_on_start", False):
+            self._ask_project()
         self._splash.show()
         self._boot()
+
+    def _ask_project(self) -> None:
+        """Choix du projet REAPER avant de lancer les moteurs (option « demander
+        à chaque démarrage ») ; Annuler = projet par défaut."""
+        from ui.project_dialog import ProjectDialog
+
+        dialog = ProjectDialog(self._cfg, startup=True)
+        if dialog.exec():
+            self._project = dialog.selected
+            config.save_config(self._cfg)
 
     # --------------------------------------------------------------- démarrage
     def _boot(self) -> None:
         self._splash.set_status("Démarrage…")
-        self._worker = StartupWorker(self._cfg, self._processes, self._vm, self._reaper)
+        self._worker = StartupWorker(self._cfg, self._processes, self._vm, self._reaper,
+                                     project=self._project)
         self._worker.progress.connect(self._splash.set_status)
         self._worker.succeeded.connect(self._on_ready)
         self._worker.failed.connect(self._on_failed)
@@ -459,6 +488,7 @@ def run_selftest(app: QApplication, cfg: dict, window: MainWindow, vm, reaper, p
                  image: Path) -> int:
     """Vérifie qu'un build fonctionne : polices, rendu de la console et des
     dialogues. Écrit IMAGE (+ _reglages / _vst) et un rapport IMAGE.txt."""
+    from ui.project_dialog import ProjectDialog
     from ui.settings_dialog import SettingsDialog
     from ui.vst_dialog import VstDialog
 
@@ -484,16 +514,23 @@ def run_selftest(app: QApplication, cfg: dict, window: MainWindow, vm, reaper, p
     settings.show()
     vst = VstDialog(window.strips[1].strip_name(), reaper, None, [], window)
     vst.show()
+    project = ProjectDialog(dict(cfg), current=reaper.project_path, startup=True, parent=window)
+    project.show()
+    splash = SplashScreen()
+    splash.set_status("Lancement de REAPER…")
+    splash.show()
     pump(0.4)
     shots[image.with_name(f"{image.stem}_reglages{image.suffix}")] = settings
     shots[image.with_name(f"{image.stem}_vst{image.suffix}")] = vst
+    shots[image.with_name(f"{image.stem}_projet{image.suffix}")] = project
+    shots[image.with_name(f"{image.stem}_chargement{image.suffix}")] = splash
     for path, widget in shots.items():
         if widget.grab().save(str(path)):
             report.append(f"OK  {path.name} ({widget.width()}×{widget.height()})")
         else:
             problems.append(f"capture impossible : {path.name}")
-    settings.hide()
-    vst.hide()
+    for widget in (settings, vst, project, splash):
+        widget.hide()
 
     report.extend(f"ERREUR {p}" for p in problems)
     report.append("RÉSULTAT : " + ("ÉCHEC" if problems else "OK"))

@@ -2,10 +2,10 @@
 #
 # Build de l'exécutable Windows (un seul fichier, sans console) :
 #     python -m PyInstaller --noconfirm --clean build.spec
-# Résultat : dist/REAPER Mixer.exe
+# Résultat : dist/REKA.exe
 #
 # Vérification du build (rend la console en mode démo dans une image) :
-#     "dist/REAPER Mixer.exe" --selftest selftest/console.png
+#     "dist/REKA.exe" --selftest selftest/console.png
 
 a = Analysis(
     ["main.py"],
@@ -32,7 +32,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="REAPER Mixer",
+    name="REKA",
     icon="assets/icon.ico",
     console=False,               # --windowed
     debug=False,
