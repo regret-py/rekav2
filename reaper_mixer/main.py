@@ -4,9 +4,9 @@ REAPER Mixer — point d'entrée.
 Séquence de démarrage :
   1. Lecture de config.json (défauts + copie utilisateur dans %APPDATA%)
   2. Lancement + masquage de Voicemeeter Potato
-  3. Lancement + masquage de REAPER (projet de session)
+  3. Installation du pont Lua, puis lancement + masquage de REAPER
   4. Login à l'API Remote de Voicemeeter (nouvel essai toutes les 5 s)
-  5. Attente de la liaison OSC avec REAPER (ping)
+  5. Attente du pont REAPER (battement de cœur)
   6. Affichage de la fenêtre principale
 
 Les étapes 2 à 5 sont bloquantes : elles tournent dans un QThread pendant
@@ -14,10 +14,15 @@ qu'un écran de chargement reste affiché et réactif.
 
 À la fermeture : sauvegarde de la config, arrêt propre des contrôleurs,
 puis arrêt des processus lancés par l'app.
+
+Options :
+  --demo            interface avec des moteurs simulés (sans Voicemeeter ni REAPER)
+  --selftest IMAGE  rend la console en démo dans IMAGE puis quitte (vérif de build)
 """
 
 from __future__ import annotations
 
+import argparse
 import logging
 import os
 import platform
@@ -29,7 +34,7 @@ from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import QLockFile, QRectF, QThread, Qt, QtMsgType, QUrl, Signal, qInstallMessageHandler
-from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QColor, QDesktopServices, QFontDatabase, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QSplashScreen
 
 from core import config
@@ -45,8 +50,8 @@ log = logging.getLogger("reaper_mixer")
 LOG_FORMAT = "%(asctime)s %(levelname)-7s [%(threadName)s] %(name)s : %(message)s"
 LOG_MAX_BYTES = 2 * 1024 * 1024
 LOG_BACKUPS = 3
-OSC_PING_TIMEOUT_S = 1.0     # attente d'une réponse à un ping OSC
-OSC_PING_RETRY_S = 1.0       # pause entre deux pings
+BRIDGE_PING_TIMEOUT_S = 1.0  # attente d'un battement de cœur du pont
+BRIDGE_RETRY_S = 0.5         # pause entre deux attentes
 STARTUP_CANCEL_WAIT_MS = 5000
 WINDOWS_APP_ID = "ReaperMixer.Console"
 
@@ -235,25 +240,26 @@ class StartupWorker(QThread):
         self._processes.start_voicemeeter()
 
         self.progress.emit("Lancement de REAPER…")
-        self._processes.start_reaper()
+        self._processes.start_reaper(prepare=self._reaper.prepare_launch)
 
         self.progress.emit("Connexion à Voicemeeter…")
         self._retry("l'API Remote de Voicemeeter", self._vm.login,
-                    timeout_s=float(vm_cfg["login_timeout_s"]),
-                    interval_s=float(vm_cfg["login_retry_s"]))
+                    timeout_s=float(vm_cfg.get("login_timeout_s", 30)),
+                    interval_s=float(vm_cfg.get("login_retry_s", 5)))
 
-        self.progress.emit("Connexion OSC à REAPER…")
+        self.progress.emit("Connexion à REAPER…")
         self._reaper.start()
-        self._retry("REAPER (OSC)", self._ping_reaper,
-                    timeout_s=float(reaper_cfg["osc_timeout_s"]),
-                    interval_s=OSC_PING_RETRY_S,
-                    hint=("Vérifie que REAPER a une surface de contrôle OSC active : "
-                          f"écoute sur le port {reaper_cfg['osc_send_port']}, "
-                          f"envoi vers {reaper_cfg['osc_host']}:{reaper_cfg['osc_listen_port']}."))
+        self._retry("REAPER", self._ping_reaper,
+                    timeout_s=float(reaper_cfg.get("bridge_timeout_s", 60)),
+                    interval_s=BRIDGE_RETRY_S,
+                    hint=("Au premier lancement, REAPER peut mettre une minute à analyser "
+                          "tes plugins : patiente puis clique sur « Réessayer ». "
+                          "Vérifie aussi qu'aucune fenêtre de REAPER (licence, message…) "
+                          "n'attend une réponse."))
 
     def _ping_reaper(self) -> None:
-        if not self._reaper.ping(timeout_s=OSC_PING_TIMEOUT_S):
-            raise TimeoutError("pas de réponse OSC")
+        if not self._reaper.ping(timeout_s=BRIDGE_PING_TIMEOUT_S):
+            raise TimeoutError("le pont REAPER Mixer ne répond pas encore")
 
     def _retry(self, what: str, action: Callable[[], object], *,
                timeout_s: float, interval_s: float, hint: str = "") -> None:
@@ -405,13 +411,15 @@ class MixerApp:
             if not self._worker.wait(STARTUP_CANCEL_WAIT_MS):
                 log.warning("Le thread de démarrage ne s'est pas arrêté à temps.")
 
-        # 1) Contrôleurs : arrêt des threads, sauvegarde du projet REAPER,
-        #    extinction propre de Voicemeeter si c'est nous qui l'avons lancé.
-        _safely(self._reaper.close, save_project=True)
+        # Ordre important : REAPER se ferme pendant que Voicemeeter (donc le
+        # pilote ASIO de l'insert) tourne encore, sinon REAPER afficherait une
+        # erreur de carte son en partant.
+        _safely(self._reaper.close, save_project=True)   # sauvegarde du projet
+        _safely(self._vm.release)                         # inserts rendus
+        _safely(self._processes.stop, "reaper")
         _safely(self._vm.close, shutdown_app=self._processes.will_terminate("voicemeeter"))
-        # 2) Config (la fenêtre y a écrit son état dans son closeEvent)
+        # La fenêtre a écrit son état dans la config (closeEvent)
         _safely(config.save_config, self._cfg)
-        # 3) Processus
         _safely(self._processes.shutdown)
 
 
@@ -426,7 +434,76 @@ def _safely(func: Callable, *args, **kwargs) -> None:
 # --------------------------------------------------------------------------- #
 # Point d'entrée
 # --------------------------------------------------------------------------- #
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog=config.APP_NAME, add_help=False)
+    parser.add_argument("--demo", action="store_true")
+    parser.add_argument("--selftest", metavar="IMAGE")
+    args, _qt_args = parser.parse_known_args(argv[1:])
+    return args
+
+
+def run_demo(app: QApplication, cfg: dict, selftest: str | None) -> int:
+    """Console avec des moteurs simulés ; avec --selftest, capture puis quitte."""
+    from core.demo import DemoProcesses, DemoReaper, DemoVoicemeeter
+
+    vm, reaper, processes = DemoVoicemeeter(cfg), DemoReaper(cfg), DemoProcesses()
+    window = MainWindow(cfg=cfg, vm=vm, reaper=reaper, processes=processes, persist=False)
+    if selftest is None:
+        app.setQuitOnLastWindowClosed(True)
+        window.show()
+        return app.exec()
+    return run_selftest(app, cfg, window, vm, reaper, processes, Path(selftest))
+
+
+def run_selftest(app: QApplication, cfg: dict, window: MainWindow, vm, reaper, processes,
+                 image: Path) -> int:
+    """Vérifie qu'un build fonctionne : polices, rendu de la console et des
+    dialogues. Écrit IMAGE (+ _reglages / _vst) et un rapport IMAGE.txt."""
+    from ui.settings_dialog import SettingsDialog
+    from ui.vst_dialog import VstDialog
+
+    def pump(seconds: float) -> None:
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            app.processEvents()
+            time.sleep(0.02)
+
+    report = [f"{config.APP_NAME} {config.APP_VERSION}",
+              f"Python {platform.python_version()} — {platform.platform()}",
+              f"Plateforme Qt : {app.platformName()}"]
+    problems = []
+    if styles.FONT_FAMILY not in QFontDatabase.families():
+        problems.append("police Inter non chargée")
+    image.parent.mkdir(parents=True, exist_ok=True)
+    window.resize(1920, 1040)
+    window.show()
+    pump(1.2)  # quelques niveaux pour remplir les VU
+    shots = {image: window}
+
+    settings = SettingsDialog(cfg, processes, reaper, vm, window, persist=False)
+    settings.show()
+    vst = VstDialog(window.strips[1].strip_name(), reaper, None, [], window)
+    vst.show()
+    pump(0.4)
+    shots[image.with_name(f"{image.stem}_reglages{image.suffix}")] = settings
+    shots[image.with_name(f"{image.stem}_vst{image.suffix}")] = vst
+    for path, widget in shots.items():
+        if widget.grab().save(str(path)):
+            report.append(f"OK  {path.name} ({widget.width()}×{widget.height()})")
+        else:
+            problems.append(f"capture impossible : {path.name}")
+    settings.hide()
+    vst.hide()
+
+    report.extend(f"ERREUR {p}" for p in problems)
+    report.append("RÉSULTAT : " + ("ÉCHEC" if problems else "OK"))
+    image.with_suffix(".txt").write_text("\n".join(report) + "\n", encoding="utf-8")
+    log.info("Auto-test : %s", " | ".join(report))
+    return 1 if problems else 0
+
+
 def main() -> int:
+    args = parse_args(sys.argv)
     log_path = setup_logging()
     install_exception_hooks()
     log.info("=== %s %s — Python %s, %s ===", config.APP_NAME, config.APP_VERSION,
@@ -443,12 +520,6 @@ def main() -> int:
     # Pendant le démarrage, fermer une popup ne doit pas quitter l'app
     app.setQuitOnLastWindowClosed(False)
 
-    # Une seule instance : deux consoles se disputeraient Voicemeeter et REAPER
-    lock = QLockFile(str(config.app_data_dir() / "instance.lock"))
-    if not lock.tryLock(100):
-        QMessageBox.information(None, config.APP_NAME, f"{config.APP_NAME} est déjà ouvert.")
-        return 0
-
     try:
         cfg = config.load_config()
     except (OSError, ValueError) as exc:
@@ -458,8 +529,16 @@ def main() -> int:
                              "Réinstalle l'application.")
         return 1
     apply_log_level(cfg.get("log_level", "INFO"))
-
     styles.apply_theme(app)
+
+    if args.demo or args.selftest:
+        return run_demo(app, cfg, args.selftest)
+
+    # Une seule instance : deux consoles se disputeraient Voicemeeter et REAPER
+    lock = QLockFile(str(config.app_data_dir() / "instance.lock"))
+    if not lock.tryLock(100):
+        QMessageBox.information(None, config.APP_NAME, f"{config.APP_NAME} est déjà ouvert.")
+        return 0
 
     mixer = MixerApp(app, cfg, log_path)
     app.aboutToQuit.connect(mixer.shutdown)

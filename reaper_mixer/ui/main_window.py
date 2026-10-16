@@ -1,7 +1,269 @@
 """
-Fenêtre principale : 6 strips à gauche, panneau master à droite.
-
-Étape 5. Contrat utilisé par main.py :
-    MainWindow(cfg=..., vm=..., reaper=..., processes=...)
-    closeEvent écrit l'état (faders, casque) dans cfg["state"] ; main.py sauvegarde.
+Fenêtre principale : strips alignés à gauche, panneau master à droite, et le
+câblage entre l'interface et les moteurs (Voicemeeter, REAPER, processus).
 """
+
+from __future__ import annotations
+
+import logging
+
+from PySide6.QtCore import QPointF, QPropertyAnimation, Qt, QTimer
+from PySide6.QtGui import QColor, QPainter, QRadialGradient
+from PySide6.QtWidgets import (QGraphicsOpacityEffect, QHBoxLayout, QLabel, QMainWindow,
+                               QMessageBox, QWidget)
+
+from core import config
+from core.voicemeeter_ctrl import DEFAULT_ROUTING, MixerLevels, MixerParams
+from ui import styles
+from ui.master_widget import MasterWidget
+from ui.settings_dialog import SettingsDialog
+from ui.strip_widget import StripWidget
+from ui.vst_dialog import VstDialog
+
+log = logging.getLogger(__name__)
+
+STRIP_GAP = 12
+FOCUS_PLUGIN_DELAY_MS = 400
+TOAST_MS = 4500
+
+
+class Background(QWidget):
+    """Noir profond avec un halo radial vert très sombre, au centre-droit."""
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor(styles.BG_WINDOW))
+        w, h = self.width(), self.height()
+        gradient = QRadialGradient(QPointF(w * 0.68, h * 0.42), max(w, h) * 0.62)
+        gradient.setColorAt(0.0, styles.color(styles.BG_GLOW, 0.95))
+        gradient.setColorAt(0.55, styles.color(styles.BG_GLOW, 0.35))
+        gradient.setColorAt(1.0, styles.color(styles.BG_GLOW, 0.0))
+        p.fillRect(self.rect(), gradient)
+
+
+class Toast(QLabel):
+    """Message discret en bas de la fenêtre, qui s'efface tout seul."""
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setWordWrap(True)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setStyleSheet(
+            f"background: {styles.BG_COLUMN}; border: 1px solid {styles.GREEN_DIM};"
+            f"border-radius: 10px; padding: 8px 14px; color: {styles.TEXT_PRIMARY};")
+        self._effect = QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(self._effect)
+        self._fade = QPropertyAnimation(self._effect, b"opacity", self)
+        self._fade.setDuration(400)
+        self._fade.finished.connect(self._after_fade)
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(lambda: self._animate(0.0))
+        self.hide()
+
+    def show_message(self, text: str) -> None:
+        self.setText(text)
+        width = min(560, self.parentWidget().width() - 40)
+        self.setFixedWidth(width)
+        self.adjustSize()
+        parent = self.parentWidget()
+        self.move((parent.width() - self.width()) // 2, parent.height() - self.height() - 24)
+        self.raise_()
+        self.show()
+        self._animate(1.0)
+        self._timer.start(TOAST_MS)
+
+    def _animate(self, target: float) -> None:
+        self._fade.stop()
+        self._fade.setStartValue(self._effect.opacity())
+        self._fade.setEndValue(target)
+        self._fade.start()
+
+    def _after_fade(self) -> None:
+        if self._effect.opacity() <= 0.01:
+            self.hide()
+
+
+class MainWindow(QMainWindow):
+    def __init__(self, cfg: dict, vm, reaper, processes, persist: bool = True,
+                 parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._cfg = cfg
+        self._persist = persist          # False en mode démo : la config n'est pas touchée
+        self._vm = vm
+        self._reaper = reaper
+        self._processes = processes
+        self._params: MixerParams | None = None
+        self._vm_ok = True
+        self._reaper_ok = reaper.is_connected
+        self._device_warned = False
+
+        ui_cfg = cfg.setdefault("ui", {})
+        self.setWindowTitle(config.APP_NAME)
+        self.resize(int(ui_cfg.get("width", 1920)), int(ui_cfg.get("height", 1040)))
+        self.setMinimumSize(1000, 640)
+
+        central = Background()
+        self.setCentralWidget(central)
+        layout = QHBoxLayout(central)
+        layout.setContentsMargins(12, 12, 14, 12)
+        layout.setSpacing(STRIP_GAP)
+
+        routing = cfg.get("voicemeeter", {}).get("routing", DEFAULT_ROUTING)
+        labels = [route.get("label", route.get("bus", "?")) for route in routing]
+        names = list(ui_cfg.get("strip_names", []))
+        self.strips: list[StripWidget] = []
+        for index in range(vm.strip_count):
+            name = names[index] if index < len(names) else f"Strip {index + 1}"
+            strip = StripWidget(index, name, labels)
+            self._wire_strip(strip)
+            layout.addWidget(strip)
+            self.strips.append(strip)
+        layout.addStretch(1)
+
+        self.master = MasterWidget()
+        self.master.headphoneChanged.connect(vm.set_headphone_gain)
+        self.master.settingsRequested.connect(self.open_settings)
+        layout.addWidget(self.master)
+
+        self.toast = Toast(central)
+
+        # Moteurs → interface
+        vm.params_changed.connect(self._on_params)
+        vm.levels_changed.connect(self._on_levels)
+        vm.connection_changed.connect(self._on_vm_connection)
+        reaper.tracks_changed.connect(self._on_tracks)
+        reaper.connection_changed.connect(self._on_reaper_connection)
+        reaper.device_changed.connect(self._on_device)
+        reaper.command_failed.connect(self.toast.show_message)
+
+        self._refresh_status()
+        for strip in self.strips:
+            strip.set_reaper_available(self._reaper_ok)
+        if reaper.device is not None:
+            self._on_device(reaper.device)
+
+        # Démarrage : état sauvegardé, noms des strips dans Voicemeeter, scrutation
+        state = cfg.get("state") or {}
+        if state.get("strips"):
+            vm.apply_state(state)
+        for strip in self.strips:
+            vm.set_label(strip.index, strip.strip_name())
+        vm.start_polling()
+
+    # ---------------------------------------------------------- câblage
+    def _wire_strip(self, strip: StripWidget) -> None:
+        vm, reaper = self._vm, self._reaper
+        strip.gainChanged.connect(vm.set_gain)
+        strip.muteToggled.connect(vm.set_mute)
+        strip.routeToggled.connect(vm.set_route)
+        strip.sendChanged.connect(vm.set_send)
+        strip.renamed.connect(self._on_renamed)
+        strip.chainToggled.connect(reaper.set_chain_enabled)
+        strip.fxAddRequested.connect(self.add_effect)
+        strip.fxOpenRequested.connect(self._open_effect)
+        strip.fxBypassRequested.connect(reaper.set_fx_enabled)
+        strip.fxRemoveRequested.connect(self._remove_effect)
+
+    # ------------------------------------------------------- moteurs → UI
+    def _on_params(self, params: MixerParams) -> None:
+        self._params = params
+        for strip, strip_params in zip(self.strips, params.strips):
+            strip.set_params(strip_params)
+        self.master.set_headphone(params.headphone_gain)
+
+    def _on_levels(self, levels: MixerLevels) -> None:
+        for strip, strip_levels in zip(self.strips, levels.strips):
+            strip.set_levels(strip_levels)
+        self.master.set_levels(levels.master)
+
+    def _on_tracks(self, tracks: list) -> None:
+        for strip in self.strips:
+            strip.set_track(tracks[strip.index] if strip.index < len(tracks) else None)
+
+    def _on_vm_connection(self, ok: bool) -> None:
+        self._vm_ok = ok
+        self._refresh_status()
+
+    def _on_reaper_connection(self, ok: bool) -> None:
+        self._reaper_ok = ok
+        for strip in self.strips:
+            strip.set_reaper_available(ok)
+        self._refresh_status()
+
+    def _refresh_status(self) -> None:
+        if not self._vm_ok:
+            self.master.set_status(False, "Voicemeeter déconnecté",
+                                   "Voicemeeter ne répond plus : faders et routing sont figés.")
+        elif self._reaper_ok:
+            self.master.set_status(True, "REAPER connecté")
+        else:
+            self.master.set_status(False, "REAPER déconnecté",
+                                   "REAPER ne répond plus : les effets ne sont plus modifiables.")
+
+    def _on_device(self, device) -> None:
+        manage = bool(self._cfg.get("voicemeeter", {}).get("manage_insert", True))
+        is_insert = device.is_voicemeeter_insert
+        self._vm.set_inserts(manage and is_insert)
+        if manage and not is_insert and not self._device_warned:
+            self._device_warned = True
+            self.toast.show_message(
+                "Les effets REAPER ne s'appliquent pas encore : choisis « Voicemeeter Insert "
+                "Virtual ASIO » comme carte son de REAPER (⚙ Réglages → préférences audio).")
+
+    # ------------------------------------------------------- actions UI
+    def _on_renamed(self, index: int, name: str) -> None:
+        names = self._cfg.setdefault("ui", {}).setdefault("strip_names", [])
+        while len(names) <= index:
+            names.append(f"Strip {len(names) + 1}")
+        names[index] = name
+        self._reaper.rename_track(index, name)
+        self._vm.set_label(index, name)
+        self._save_config()
+
+    def add_effect(self, index: int) -> None:
+        strip = self.strips[index]
+        exe = self._processes.executable("reaper") if self._processes is not None else None
+        dialog = VstDialog(strip.strip_name(), self._reaper, self._reaper.resource_path(exe),
+                           self._cfg.get("vst", {}).get("extra_dirs", []), self)
+        if dialog.exec() and dialog.selected is not None:
+            log.info("Ajout de %s sur %s", dialog.selected.add_name, strip.strip_name())
+            self._reaper.add_fx(index, dialog.selected.add_name)
+
+    def _open_effect(self, index: int, fx_index: int) -> None:
+        self._reaper.toggle_fx_ui(index, fx_index)
+        name = self.strips[index].fx_name(fx_index)
+        if name and self._processes is not None:
+            # L'interface du plugin s'ouvre dans REAPER (caché) : on la ramène devant
+            QTimer.singleShot(FOCUS_PLUGIN_DELAY_MS, self,
+                              lambda: self._processes.focus_window("reaper", name))
+
+    def _remove_effect(self, index: int, fx_index: int) -> None:
+        name = self.strips[index].fx_name(fx_index) or "cet effet"
+        answer = QMessageBox.question(
+            self, "Supprimer l'effet",
+            f"Supprimer « {name} » de « {self.strips[index].strip_name()} » ?\n"
+            "Ses réglages seront perdus.")
+        if answer == QMessageBox.StandardButton.Yes:
+            self._reaper.remove_fx(index, fx_index)
+
+    def open_settings(self) -> None:
+        SettingsDialog(self._cfg, self._processes, self._reaper, self._vm, self,
+                       persist=self._persist).exec()
+
+    # ------------------------------------------------------------ fermeture
+    def closeEvent(self, event) -> None:  # noqa: N802
+        if self._params is not None:
+            self._cfg["state"] = self._params.to_state()
+        if not self.isMaximized() and not self.isFullScreen():
+            self._cfg.setdefault("ui", {}).update(width=self.width(), height=self.height())
+        self._save_config()
+        super().closeEvent(event)
+
+    def _save_config(self) -> None:
+        if not self._persist:
+            return
+        try:
+            config.save_config(self._cfg)
+        except OSError as exc:
+            log.error("Config non sauvegardée : %s", exc)
