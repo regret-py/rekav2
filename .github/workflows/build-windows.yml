@@ -97,7 +97,8 @@ jobs:
           info.update(
               sha256=hashlib.sha256(data).hexdigest(), size=len(data),
               url=f"https://github.com/{info['repo']}/releases/download/{info['tag']}/REKA.exe",
-              notes=subprocess.check_output(["git", "log", "-1", "--format=%s"], text=True).strip(),
+              notes=subprocess.check_output(["git", "log", "-1", "--format=%s"],
+                                            encoding="utf-8").strip(),   # git écrit en UTF-8
               published=datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"))
           json.dump(info, open("dist/version.json", "w", encoding="utf-8"), ensure_ascii=False, indent=2)
           print(json.dumps(info, ensure_ascii=False, indent=2))
