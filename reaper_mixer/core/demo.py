@@ -104,6 +104,11 @@ class DemoVoicemeeter(QObject):
     def is_physical(self, strip: int) -> bool:
         return self._vm_strips[strip] < self.edition.physical_strips
 
+    def virtual_input(self, strip: int) -> int | None:
+        vm_strip = self._vm_strips[strip]
+        return None if vm_strip < self.edition.physical_strips else \
+            vm_strip - self.edition.physical_strips
+
     def set_pad(self, strip: int, mode: str, x: float, y: float) -> None:
         if mode not in self.pad_modes(strip):
             return

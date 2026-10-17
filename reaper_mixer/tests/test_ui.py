@@ -4,7 +4,7 @@ import pytest
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QTimer
 from PySide6.QtGui import QMouseEvent, QWheelEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
+from PySide6.QtWidgets import QApplication, QDialog, QLabel, QMessageBox
 
 from conftest import pump
 
@@ -33,11 +33,13 @@ def drag(widget, start, end, steps=10):
 
 @pytest.fixture
 def mixer(qapp, cfg):
+    from core.app_volume import DemoAppVolumes
     from core.demo import DemoProcesses, DemoReaper, DemoVoicemeeter
     from ui.main_window import MainWindow
 
     vm, reaper = DemoVoicemeeter(cfg), DemoReaper(cfg)
-    window = MainWindow(cfg=cfg, vm=vm, reaper=reaper, processes=DemoProcesses(), persist=False)
+    window = MainWindow(cfg=cfg, vm=vm, reaper=reaper, processes=DemoProcesses(), persist=False,
+                        apps=DemoAppVolumes())
     window.resize(1920, 1040)
     window.show()
     pump(qapp, 0.2)
@@ -467,3 +469,156 @@ def test_state_saved_on_close(qapp, mixer):
     pump(qapp, 0.05)
     window.close()
     assert window._cfg["state"]["strips"][1]["routes"][2] is True
+
+
+# ------------------------------------------------- volume par application
+def test_apps_button_and_mixer(qapp, mixer):
+    window, _, _ = mixer
+    with_apps = [strip.index for strip in window.strips if strip.apps is not None]
+    assert with_apps == [2, 3, 5]                        # Appels, Bureau, Autres 2 (virtuelles)
+    window.refresh_app_counts()
+    assert [window.strips[i].apps.count() for i in with_apps] == [2, 2, 0]
+
+    QTest.mouseClick(window.strips[2].apps, LEFT)
+    pump(qapp, 0.3)
+    popup = window._app_mixer
+    assert popup is not None and popup.isVisible() and list(popup.rows) == ["discord.exe", "chrome.exe"]
+    row = popup.rows["discord.exe"]
+    row.slider.setValue(40)                              # comme un glisser
+    assert window._apps.apps(0)[0].volume == 0.4 and row.percent.text() == "40 %"
+    QTest.mouseClick(row.mute, LEFT)
+    pump(qapp, 0.3)
+    assert window._apps.apps(0)[0].muted and row.mute.isChecked() and row.peak.level() == 0.0
+    popup.close()
+    pump(qapp, 0.1)
+    assert window._app_mixer is None
+
+    window.open_app_mixer(5)                             # Autres 2 : aucune application
+    pump(qapp, 0.2)
+    assert not window._app_mixer.rows and window._app_mixer.empty.isVisible()
+    window._app_mixer.close()
+    pump(qapp, 0.1)
+
+
+def test_no_apps_button_without_backend(qapp, cfg):
+    from core.demo import DemoProcesses, DemoReaper, DemoVoicemeeter
+    from ui.main_window import MainWindow
+
+    window = MainWindow(cfg=cfg, vm=DemoVoicemeeter(cfg), reaper=DemoReaper(cfg),
+                        processes=DemoProcesses(), persist=False)
+    assert all(strip.apps is None for strip in window.strips)
+    window.close()
+
+
+# ------------------------------------------------------------ mises à jour
+def _fake_updater():
+    from PySide6.QtCore import QObject, Signal
+
+    from core.updater import BuildInfo, UpdateInfo
+
+    class Updater(QObject):
+        available = Signal(object)
+        up_to_date = Signal()
+        failed = Signal(str)
+
+        def __init__(self):
+            super().__init__()
+            self.build = BuildInfo("0.5.0", 5, "c", "o/r", "build-x")
+            self.latest = None
+            self.enabled = True
+            self.checks = []
+
+        def check(self, manual=False):
+            self.checks.append(manual)
+            return True
+
+    update = UpdateInfo("0.6.0", 7, "c", "https://example.invalid/REKA.exe", "0" * 64, 10,
+                        "Notes", "")
+    return Updater(), update
+
+
+@pytest.fixture
+def updating(qapp, cfg):
+    from core.app_volume import DemoAppVolumes
+    from core.demo import DemoProcesses, DemoReaper, DemoVoicemeeter
+    from ui.main_window import MainWindow
+
+    updater, update = _fake_updater()
+    window = MainWindow(cfg=cfg, vm=DemoVoicemeeter(cfg), reaper=DemoReaper(cfg),
+                        processes=DemoProcesses(), persist=False, apps=DemoAppVolumes(),
+                        updater=updater)
+    window.show()
+    pump(qapp, 0.1)
+    yield window, updater, update
+    window.close()
+
+
+def test_update_banner_and_skip(qapp, updating):
+    window, updater, update = updating
+    assert window.master.update_button.isHidden()
+    updater.latest = update
+    updater.available.emit(update)
+    pump(qapp, 0.05)
+    assert not window.master.update_button.isHidden()
+    assert "0.6.0" in window.master.update_button.text()
+
+    shown = []
+
+    def skip():
+        dialog = QApplication.activeModalWidget()
+        shown.append(dialog.update_info.describe())
+        dialog.skip_button.click()
+
+    QTimer.singleShot(150, skip)
+    QTest.mouseClick(window.master.update_button, LEFT)
+    pump(qapp, 0.3)
+    assert shown == ["0.6.0 (build 7)"]
+    assert window._cfg["update"]["skipped_build"] == 7 and window.master.update_button.isHidden()
+    updater.available.emit(update)                       # vérification automatique suivante
+    pump(qapp, 0.05)
+    assert window.master.update_button.isHidden()        # version ignorée : plus de pill
+
+
+def test_about_tab_update_check(qapp, updating):
+    from ui.settings_dialog import SettingsDialog
+
+    window, updater, update = updating
+    dialog = SettingsDialog(window._cfg, None, None, window._vm, window, persist=False,
+                            updater=updater)
+    titles = [label.text() for label in dialog.findChildren(QLabel, "dialogTitle")]
+    assert "REKA 0.5.0 (build 5)" in titles
+    assert dialog.check_update.isEnabled() and dialog.install_update.isHidden()
+    dialog.check_update.click()
+    assert updater.checks == [True] and not dialog.check_update.isEnabled()
+    updater.up_to_date.emit()
+    assert dialog.update_status.text() == "REKA est à jour." and dialog.check_update.isEnabled()
+    updater.failed.emit("hors ligne")
+    assert "hors ligne" in dialog.update_status.text()
+    updater.available.emit(update)
+    assert not dialog.install_update.isHidden() and "0.6.0" in dialog.update_status.text()
+    dialog.auto_update.setChecked(False)
+    assert window._cfg["update"]["check_on_start"] is False
+    dialog.done(0)
+
+
+def test_install_from_settings_opens_update_dialog(qapp, updating):
+    window, updater, update = updating
+    updater.latest = update                              # trouvée par une recherche manuelle
+    seen = []
+
+    def in_settings():
+        settings = QApplication.activeModalWidget()
+        settings.tabs.setCurrentIndex(3)
+        settings._on_update_available(update)
+        QTimer.singleShot(150, in_update)
+        settings.install_update.click()
+
+    def in_update():
+        dialog = QApplication.activeModalWidget()
+        seen.append(type(dialog).__name__)
+        dialog.reject()
+
+    QTimer.singleShot(150, in_settings)
+    window.open_settings()
+    pump(qapp, 0.3)
+    assert seen == ["UpdateDialog"]

@@ -1,6 +1,7 @@
 """
 Un strip complet, de haut en bas : effets (REAPER), 4 knobs de routing,
-Intellipan (le carré au petit cube rouge de Voicemeeter), bouton Muet,
+Intellipan (le carré au petit cube rouge de Voicemeeter), bouton Muet (et,
+sur les entrées virtuelles, bouton « Apps » : volume par application),
 fader + VU, nom éditable (double-clic).
 
 Le strip ne parle à aucun moteur : il émet des signaux, la fenêtre principale
@@ -30,6 +31,7 @@ ROUTING_SECTION_HEIGHT = 102
 PAD_SECTION_HEIGHT = PAD_HEIGHT + 8
 VU_BAR_WIDTH, VU_GAP = 7, 3      # VU-mètres des strips (largeur d'une barre, écart)
 MUTE_HEIGHT = 25
+APPS_BUTTON_WIDTH = 50
 NAME_HEIGHT = 24
 SLOT_PITCH = PILL_HEIGHT + 2
 MIN_SLOTS = 8
@@ -88,6 +90,60 @@ class FxBadge(QAbstractButton):
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawArc(QRectF(c.x() - r, c.y() - r, 2 * r, 2 * r), 125 * 16, 290 * 16)
         p.drawLine(QPointF(c.x(), c.y() - r - 1.5), QPointF(c.x(), c.y() - 0.5))
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self.update()
+        super().leaveEvent(event)
+
+
+# --------------------------------------------------------------------------- #
+# Bouton « Apps » (volume par application)
+# --------------------------------------------------------------------------- #
+class AppsButton(QAbstractButton):
+    """Icône de mélangeur + nombre d'applications qui jouent sur la strip."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._count = 0
+        self.setFixedSize(APPS_BUTTON_WIDTH, MUTE_HEIGHT)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Volume par application")
+
+    def count(self) -> int:
+        return self._count
+
+    def set_count(self, count: int) -> None:
+        if count != self._count:
+            self._count = count
+            self.setToolTip(f"Volume par application — {count} application(s)" if count
+                            else "Volume par application — aucune application ne joue ici")
+            self.update()
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(0.5, 0.5, self.width() - 1, self.height() - 1)
+        hover = self.underMouse() or self.isDown()
+        p.setPen(QPen(QColor(styles.GREEN_DIM if hover else styles.BORDER_COLUMN), 1))
+        p.setBrush(QColor(styles.BUTTON_HOVER if hover else styles.BUTTON_BG))
+        p.drawRoundedRect(rect, 7, 7)
+        # Icône : trois glissières horizontales
+        ink = QColor(styles.TEXT_PRIMARY)
+        p.setPen(QPen(ink, 1.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        left, top = 9.0, self.height() / 2 - 5
+        for n, knob in enumerate((0.7, 0.3, 0.55)):
+            y = top + n * 5
+            p.drawLine(QPointF(left, y), QPointF(left + 12, y))
+            p.setBrush(ink)
+            p.drawEllipse(QPointF(left + 12 * knob, y), 1.8, 1.8)
+        p.setFont(styles.font(10, QFont.Weight.DemiBold))
+        p.setPen(QColor(styles.GREEN_NEON if self._count else styles.TEXT_MUTED))
+        p.drawText(QRectF(left + 15, 0, self.width() - left - 19, self.height()),
+                   Qt.AlignmentFlag.AlignCenter, str(self._count))
 
     def enterEvent(self, event) -> None:  # noqa: N802
         self.update()
@@ -268,10 +324,11 @@ class StripWidget(QFrame):
     fxRemoveRequested = Signal(int, int)
     padMoved = Signal(int, str, float, float)    # (strip, mode, x, y)
     padModeChanged = Signal(int, str)
+    appsRequested = Signal(int)
 
     def __init__(self, index: int, name: str, route_labels: list[str],
                  sends_adjustable: bool = True, pad_modes: tuple[str, ...] = ("color", "pan", "fx"),
-                 physical: bool = True, pad_mode: str | None = None,
+                 physical: bool = True, pad_mode: str | None = None, apps_button: bool = False,
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.index = index
@@ -293,7 +350,17 @@ class StripWidget(QFrame):
         self.mute.setFixedHeight(MUTE_HEIGHT)
         self.mute.setCursor(Qt.CursorShape.PointingHandCursor)
         self.mute.toggled.connect(self._on_mute)
-        layout.addWidget(self.mute)
+        self.apps: AppsButton | None = None
+        if apps_button:
+            row = QHBoxLayout()
+            row.setSpacing(4)
+            row.addWidget(self.mute, 1)
+            self.apps = AppsButton()
+            self.apps.clicked.connect(lambda: self.appsRequested.emit(self.index))
+            row.addWidget(self.apps)
+            layout.addLayout(row)
+        else:
+            layout.addWidget(self.mute)
 
         layout.addWidget(self._build_fader_section(), 1)
 

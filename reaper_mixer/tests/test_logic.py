@@ -462,3 +462,30 @@ def test_other_edition_running(qapp, cfg, monkeypatch):
     remote.type = "potato"
     vm.login()
     vm.close()
+
+
+def test_app_volume_device_matching_and_demo():
+    from core.app_volume import DemoAppVolumes, NullAppVolumes, match_device
+
+    names = {
+        "Voicemeeter Input (VB-Audio Voicemeeter VAIO)": 0,
+        "Voicemeeter AUX Input (VB-Audio Voicemeeter AUX VAIO)": 1,
+        "Voicemeeter VAIO3 Input (VB-Audio Voicemeeter VAIO3)": 2,
+        "VoiceMeeter Aux Input (VB-Audio VoiceMeeter AUX VAIO)": 1,       # ancienne graphie
+        "Haut-parleurs (Realtek(R) Audio)": None,
+        "CABLE Input (VB-Audio Virtual Cable)": None,
+    }
+    for name, expected in names.items():
+        assert [i for i in range(3) if match_device(name, i)] == ([] if expected is None else [expected])
+    assert match_device("Mon câble perso", 1, ["", "câble perso", ""])     # voicemeeter.app_devices
+    assert not match_device("Voicemeeter Input (VB-Audio Voicemeeter VAIO)", 0, ["autre"])
+
+    demo = DemoAppVolumes()
+    discord = demo.apps(0)[0]
+    assert discord.name == "Discord" and 0 < discord.peak <= 1
+    demo.set_volume(0, "discord.exe", 0.3)
+    demo.set_mute(0, "discord.exe", True)
+    discord = demo.apps(0)[0]
+    assert discord.volume == 0.3 and discord.muted and discord.peak == 0.0
+    assert demo.apps(2) == [] and demo.device_name(2)
+    assert not NullAppVolumes().available and NullAppVolumes().apps(0) == []

@@ -61,3 +61,17 @@ def test_launch_hide_show_close_notepad():
     finally:
         manager.shutdown()
     assert not managed.is_alive(), "Bloc-notes toujours ouvert après shutdown()"
+
+
+def test_app_volume_backend_loads():
+    """Le moteur Core Audio se charge et parcourt les périphériques sans erreur
+    (la machine de test n'a pas forcément Voicemeeter ni de carte son)."""
+    from core.app_volume import WindowsAppVolumes, create_backend
+
+    backend = WindowsAppVolumes()
+    for index in range(3):
+        name = backend.device_name(index)
+        apps = backend.apps(index)
+        assert name is None or "voicemeeter" in name.lower() or name
+        assert isinstance(apps, list)
+    assert create_backend({}).available

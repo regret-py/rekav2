@@ -65,6 +65,8 @@ sur son insert (désactivable dans ⚙ → Options).
 | Fader | glisser (Maj = fin), molette, double-clic = 0 dB |
 | Knobs Monitor / Mic Out / Discord / Obs | clic = envoi on/off vers A1 / B1 / B2 / A2, glisser = niveau d'envoi |
 | Intellipan (carré au petit cube rouge) | glisser le cube = régler, double-clic = neutre, clic sur le titre ou clic droit = mode |
+| Bouton Apps (strips virtuelles) | volume, mute et niveau de chaque application qui joue sur la strip |
+| Pill « Mise à jour » (Master) | apparaît quand une nouvelle version est en ligne ; clic pour l'installer |
 | Muet | coupe la strip |
 | Pill d'effet | clic = ouvrir/fermer l'interface du plugin, clic droit = bypass / supprimer |
 | Emplacement vide (« + ») | ajouter un effet (recherche dans les plugins connus de REAPER) |
@@ -90,6 +92,35 @@ petit cube rouge.
 - **Entrées virtuelles** (Appels, Bureau, Autres 2) : **POSITION** (panoramique 5.1).
 
 Le mode choisi est retenu pour chaque strip. Double-clic = retour au neutre.
+
+## Volume par application
+
+Sur les strips virtuelles (Appels, Bureau, Autres 2 — les entrées « Voicemeeter Input »,
+« Voicemeeter AUX Input », « Voicemeeter VAIO3 Input » de Windows), le bouton **Apps** à
+côté de **Muet** affiche le nombre d'applications qui y jouent. Un clic ouvre la liste :
+pour chaque application (Discord, Spotify, navigateur, jeu…), son volume, son niveau en
+direct et un bouton pour la couper. Ce sont les réglages Windows de l'application (les
+mêmes que dans le mélangeur de volume de Windows) : ils sont conservés par Windows.
+
+Pour qu'une application apparaisse sur une strip, choisis la sortie Voicemeeter
+correspondante dans l'application ou dans Windows (Paramètres › Son › Mélangeur de volume).
+Si tes périphériques ont d'autres noms, indique-les dans `config.json`
+(`voicemeeter.app_devices`, un morceau de nom par entrée virtuelle).
+
+## Mises à jour
+
+REKA vérifie au démarrage (puis toutes les 6 heures) si une nouvelle version est en ligne.
+Si oui, une pill **Mise à jour** apparaît dans le panneau Master :
+
+- **Mettre à jour** : REKA télécharge le nouvel exe, vérifie qu'il est complet (empreinte
+  SHA-256), le met à la place de l'ancien puis redémarre dessus. Réglages et projet REAPER
+  sont conservés.
+- **Navigateur** : télécharge REKA.exe à la main ; **Plus tard** ; **Ignorer cette
+  version** (REKA ne la propose plus, sauf recherche manuelle).
+
+⚙ → **À propos** : version et numéro de build, **Rechercher une mise à jour**, et l'option
+**Vérifier les mises à jour au démarrage**. Chaque build GitHub publie, à côté de
+`REKA.exe`, un `version.json` (numéro de build, taille, empreinte) que REKA consulte.
 
 ## Personnaliser l'interface
 

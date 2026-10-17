@@ -207,10 +207,60 @@ class ProjectButton(QAbstractButton):
         super().leaveEvent(event)
 
 
+class UpdateButton(QAbstractButton):
+    """Pill accent « ⬆ Mise à jour x.y » : visible quand une nouvelle version existe."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._text = ""
+        self.setFixedHeight(22)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.hide()
+
+    def text(self) -> str:  # noqa: D401 - API Qt
+        return self._text
+
+    def set_text(self, text: str) -> None:
+        self._text = text
+        self.update()
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(0.5, 0.5, self.width() - 1, self.height() - 1)
+        accent = QColor(styles.GREEN_BRIGHT if self.underMouse() else styles.GREEN_NEON)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(accent)
+        p.drawRoundedRect(rect, rect.height() / 2, rect.height() / 2)
+        ink = QColor(styles.ON_ACCENT_DARK)
+        # Flèche vers le haut
+        p.setPen(QPen(ink, 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        cx, cy = 13.0, rect.center().y()
+        p.drawLine(QPointF(cx, cy + 4), QPointF(cx, cy - 4))
+        p.drawLine(QPointF(cx - 3.5, cy - 0.5), QPointF(cx, cy - 4))
+        p.drawLine(QPointF(cx + 3.5, cy - 0.5), QPointF(cx, cy - 4))
+        p.setFont(styles.font(10, QFont.Weight.DemiBold))
+        p.setPen(ink)
+        text_rect = rect.adjusted(22, 0, -8, 0)
+        text = p.fontMetrics().elidedText(self._text, Qt.TextElideMode.ElideRight,
+                                          int(text_rect.width()))
+        p.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, text)
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self.update()
+        super().leaveEvent(event)
+
+
 class MasterWidget(QFrame):
     settingsRequested = Signal()
     projectRequested = Signal()
     minimizeRequested = Signal()
+    updateRequested = Signal()
     headphoneChanged = Signal(float)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -242,6 +292,9 @@ class MasterWidget(QFrame):
         self.project = ProjectButton()
         self.project.clicked.connect(self.projectRequested)
         layout.addWidget(self.project)
+        self.update_button = UpdateButton()
+        self.update_button.clicked.connect(self.updateRequested)
+        layout.addWidget(self.update_button)
 
         knob_section = make_section()
         knob_box = QVBoxLayout(knob_section)
@@ -286,6 +339,13 @@ class MasterWidget(QFrame):
 
     def set_project(self, name: str, path: str) -> None:
         self.project.set_project(name, path)
+
+    def set_update(self, version: str | None) -> None:
+        """Affiche (ou cache) la pill de mise à jour."""
+        if version:
+            self.update_button.set_text(f"Mise à jour {version}")
+            self.update_button.setToolTip(f"REKA {version} est disponible — clic pour l'installer")
+        self.update_button.setVisible(bool(version))
 
     def _on_knob(self, db: float) -> None:
         self._show_value(db)

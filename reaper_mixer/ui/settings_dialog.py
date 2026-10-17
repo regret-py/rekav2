@@ -5,7 +5,7 @@ Réglages de REKA, en onglets :
   - Audio      : carte son de REAPER, affichage des moteurs, options
   - Apparence  : thème de couleur, image d'arrière-plan, transparence des
                  panneaux, fenêtre
-  - À propos   : version, développeurs, journaux
+  - À propos   : version, développeurs, mises à jour, journaux
 
 Les options s'appliquent tout de suite ; tout est écrit dans la config à la
 fermeture. Les chemins et l'édition de Voicemeeter demandent un redémarrage.
@@ -104,9 +104,10 @@ class SettingsDialog(QDialog):
     appearanceChanged = Signal()     # arrière-plan / transparence modifiés
     windowResetRequested = Signal()  # « Taille compacte »
     restartRequested = Signal()      # changement d'édition de Voicemeeter
+    updateRequested = Signal()       # « Installer la mise à jour »
 
     def __init__(self, cfg: dict, processes, reaper, vm, parent: QWidget | None = None,
-                 persist: bool = True) -> None:
+                 persist: bool = True, updater=None) -> None:
         super().__init__(parent)
         self.setWindowTitle(f"Réglages — {config.APP_NAME}")
         self.setMinimumWidth(600)
@@ -115,6 +116,7 @@ class SettingsDialog(QDialog):
         self._processes = processes
         self._reaper = reaper
         self._vm = vm
+        self._updater = updater
         # Édition réellement en cours (le choix ne s'applique qu'au redémarrage)
         self._running_kind = getattr(getattr(vm, "edition", None), "kind", None) or edition(cfg).kind
 
@@ -368,9 +370,10 @@ class SettingsDialog(QDialog):
         logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
         pixmap = QPixmap(str(config.resource_path("assets/reka_logo.png")))
         if not pixmap.isNull():
-            logo.setPixmap(pixmap.scaledToWidth(360, Qt.TransformationMode.SmoothTransformation))
+            logo.setPixmap(pixmap.scaledToWidth(300, Qt.TransformationMode.SmoothTransformation))
         box.addWidget(logo)
-        name = QLabel(f"{config.APP_NAME} {config.APP_VERSION}")
+        build = getattr(self._updater, "build", None)
+        name = QLabel(f"{config.APP_NAME} {build.describe() if build else config.APP_VERSION}")
         name.setObjectName("dialogTitle")
         name.setAlignment(Qt.AlignmentFlag.AlignCenter)
         box.addWidget(name)
@@ -381,6 +384,7 @@ class SettingsDialog(QDialog):
         about = _hint("Console de mixage pour Voicemeeter et REAPER.")
         about.setAlignment(Qt.AlignmentFlag.AlignCenter)
         box.addWidget(about)
+        box.addWidget(self._update_group())
         logs = QPushButton("Ouvrir le dossier des journaux")
         logs.clicked.connect(lambda: QDesktopServices.openUrl(
             QUrl.fromLocalFile(str(config.app_data_dir()))))
@@ -391,6 +395,58 @@ class SettingsDialog(QDialog):
         box.addLayout(row)
         box.addStretch(1)
         return page
+
+    def _update_group(self) -> QGroupBox:
+        group = QGroupBox("Mises à jour")
+        box = QVBoxLayout(group)
+        update_cfg = self._cfg.setdefault("update", {})
+        self.auto_update = QCheckBox("Vérifier les mises à jour au démarrage")
+        self.auto_update.setChecked(bool(update_cfg.get("check_on_start", True)))
+        self.auto_update.toggled.connect(lambda on: update_cfg.__setitem__("check_on_start", on))
+        box.addWidget(self.auto_update)
+        row = QHBoxLayout()
+        self.update_status = _hint("")
+        row.addWidget(self.update_status, 1)
+        self.check_update = QPushButton("Rechercher une mise à jour")
+        self.check_update.clicked.connect(self._check_update)
+        row.addWidget(self.check_update)
+        self.install_update = QPushButton("Installer…")
+        self.install_update.setObjectName("primary")
+        self.install_update.clicked.connect(self.updateRequested)
+        self.install_update.hide()
+        row.addWidget(self.install_update)
+        box.addLayout(row)
+        enabled = self._updater is not None and self._updater.enabled
+        self.auto_update.setEnabled(enabled)
+        self.check_update.setEnabled(enabled)
+        if not enabled:
+            self.update_status.setText("Version de développement : pas de mise à jour automatique.")
+        elif self._updater.latest is not None:
+            self._on_update_available(self._updater.latest)
+        if enabled:
+            self._updater.available.connect(self._on_update_available)
+            self._updater.up_to_date.connect(self._on_up_to_date)
+            self._updater.failed.connect(self._on_update_failed)
+        return group
+
+    def _check_update(self) -> None:
+        if self._updater is not None and self._updater.check(manual=True):
+            self.check_update.setEnabled(False)
+            self.update_status.setText("Recherche en cours…")
+
+    def _on_update_available(self, update) -> None:
+        self.check_update.setEnabled(True)
+        self.update_status.setText(f"REKA {update.describe()} est disponible.")
+        self.install_update.show()
+
+    def _on_up_to_date(self) -> None:
+        self.check_update.setEnabled(True)
+        self.update_status.setText("REKA est à jour.")
+        self.install_update.hide()
+
+    def _on_update_failed(self, message: str) -> None:
+        self.check_update.setEnabled(True)
+        self.update_status.setText(f"Vérification impossible : {message}")
 
     # ------------------------------------------------------------ actions
     def _browse(self, edit: QLineEdit, label: str) -> None:
@@ -533,13 +589,19 @@ class SettingsDialog(QDialog):
             self._show_engine("reaper", False)
         if self.show_vm.isChecked():
             self._show_engine("voicemeeter", False)
+        connections = []
         if self._reaper is not None:
-            for signal, slot in ((self._reaper.device_changed, self._show_device),
-                                 (self._reaper.project_changed, self._show_project)):
-                try:
-                    signal.disconnect(slot)
-                except (RuntimeError, TypeError):
-                    pass
+            connections += [(self._reaper.device_changed, self._show_device),
+                            (self._reaper.project_changed, self._show_project)]
+        if self._updater is not None and self._updater.enabled:
+            connections += [(self._updater.available, self._on_update_available),
+                            (self._updater.up_to_date, self._on_up_to_date),
+                            (self._updater.failed, self._on_update_failed)]
+        for signal, slot in connections:
+            try:
+                signal.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass
         self._save()
         super().done(result)
 

@@ -20,7 +20,14 @@
     "login_timeout_s": 30,
     "login_retry_s": 5,
     "close_timeout_s": 8,
-    "terminate_on_exit": true
+    "terminate_on_exit": true,
+    "app_devices": []
+  },
+  "update": {
+    "check_on_start": true,
+    "interval_hours": 6,
+    "skipped_build": 0,
+    "url": ""
   },
   "reaper": {
     "path": "",

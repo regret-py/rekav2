@@ -58,6 +58,19 @@ jobs:
         run: python -m pip install -r requirements.txt pytest
       - name: Tests (dont masquage de fenêtres Win32)
         run: python -m pytest -q tests
+      - name: Infos du build (mises à jour automatiques)
+        run: |
+          python - <<'PY'
+          import json, os, re
+          source = open("core/config.py", encoding="utf-8").read()
+          version = re.search(r'^APP_VERSION = "([^"]+)"', source, re.M).group(1)
+          branch = os.environ["GITHUB_REF_NAME"].replace("/", "-")
+          info = {"version": version, "build": int(os.environ["GITHUB_RUN_NUMBER"]),
+                  "commit": os.environ["GITHUB_SHA"], "repo": os.environ["GITHUB_REPOSITORY"],
+                  "tag": f"build-{branch}"}
+          json.dump(info, open("build_info.json", "w", encoding="utf-8"), indent=2)
+          print(info)
+          PY
       - name: Build PyInstaller
         run: python -m PyInstaller --noconfirm --clean build.spec
       - name: Propriétés de l'exe (version, développeurs)
@@ -75,12 +88,27 @@ jobs:
           cat selftest/console.txt
           grep -q "RÉSULTAT : OK" selftest/console.txt
           ls -la dist selftest
+      - name: Description de la mise à jour (version.json)
+        run: |
+          python - <<'PY'
+          import datetime, hashlib, json, subprocess
+          info = json.load(open("build_info.json", encoding="utf-8"))
+          data = open("dist/REKA.exe", "rb").read()
+          info.update(
+              sha256=hashlib.sha256(data).hexdigest(), size=len(data),
+              url=f"https://github.com/{info['repo']}/releases/download/{info['tag']}/REKA.exe",
+              notes=subprocess.check_output(["git", "log", "-1", "--format=%s"], text=True).strip(),
+              published=datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"))
+          json.dump(info, open("dist/version.json", "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+          print(json.dumps(info, ensure_ascii=False, indent=2))
+          PY
       - name: Artefact
         uses: actions/upload-artifact@v4
         with:
           name: REKA
           path: |
             reaper_mixer/dist/REKA.exe
+            reaper_mixer/dist/version.json
             reaper_mixer/selftest/
       - name: Release « build-<branche> »
         if: github.event_name == 'push'
@@ -89,7 +117,7 @@ jobs:
         run: |
           tag="build-${GITHUB_REF_NAME//\//-}"
           gh release delete "$tag" --yes --cleanup-tag || true
-          gh release create "$tag" dist/REKA.exe selftest/console.png \
+          gh release create "$tag" dist/REKA.exe dist/version.json selftest/console.png \
             --prerelease --target "$GITHUB_SHA" \
             --title "REKA — dernier build ($GITHUB_REF_NAME)" \
             --notes "Exécutable Windows construit automatiquement depuis $GITHUB_SHA.

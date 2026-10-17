@@ -7,3 +7,4 @@ dist/
 selftest/
 .pytest_cache/
 *.log
+reaper_mixer/build_info.json

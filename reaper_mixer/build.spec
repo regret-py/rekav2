@@ -58,9 +58,11 @@ a = Analysis(
     datas=[
         ("config.json", "."),
         ("assets", "assets"),
+        # Numéro de build et release (écrit par le build GitHub) : mises à jour
+        *([("build_info.json", ".")] if os.path.isfile(os.path.join(SPECPATH, "build_info.json")) else []),
     ],
     # Importés à l'intérieur de fonctions : on les déclare explicitement
-    hiddenimports=["voicemeeterlib", "core.demo"],
+    hiddenimports=["voicemeeterlib", "core.demo", "pycaw.utils", "pycaw.api.endpointvolume"],
     hookspath=[],
     runtime_hooks=[],
     excludes=["tkinter", "unittest", "pydoc", "PySide6.QtQml", "PySide6.QtQuick",

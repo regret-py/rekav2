@@ -355,6 +355,12 @@ class VoicemeeterController(QObject):
     def is_physical(self, strip: int) -> bool:
         return self._strips[strip] < self._edition.physical_strips
 
+    def virtual_input(self, strip: int) -> int | None:
+        """Entrée virtuelle d'une strip (0 VAIO, 1 AUX, 2 VAIO3), None si matérielle."""
+        vm_strip = self._strips[strip]
+        return None if vm_strip < self._edition.physical_strips else \
+            vm_strip - self._edition.physical_strips
+
     def set_pad(self, strip: int, mode: str, x: float, y: float) -> None:
         """Position du petit cube de l'Intellipan (mode : color, pan ou fx)."""
         if mode not in self.pad_modes(strip):

@@ -10,6 +10,8 @@ voicemeeter-api>=2.5,<3
 # Processus, fenêtres et registre Windows
 psutil>=5.9
 pywin32>=306; sys_platform == "win32"
+# Volume par application (sessions audio Windows / Core Audio)
+pycaw>=20240316; sys_platform == "win32"
 
 # Build de l'exécutable
 pyinstaller>=6.10   # PYINSTALLER_RESET_ENVIRONMENT (redémarrage)

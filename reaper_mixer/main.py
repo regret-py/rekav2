@@ -34,16 +34,19 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QLockFile, QRectF, QThread, Qt, QtMsgType, QUrl, Signal, qInstallMessageHandler
+from PySide6.QtCore import (QLockFile, QRectF, QThread, Qt, QtMsgType, QTimer, QUrl, Signal,
+                            qInstallMessageHandler)
 from PySide6.QtGui import QColor, QDesktopServices, QFontDatabase, QIcon, QPainter, QPixmap
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QSplashScreen
 
 from core import config
+from core.app_volume import create_backend
 from core.process_manager import (AppNotInstalledError, OtherEditionRunningError, ProcessManager,
                                   ProcessManagerError, StartupAborted,
                                   installed_voicemeeter_kinds)
 from core.reaper_ctrl import ReaperController
+from core.updater import UpdateChecker, cleanup_previous, load_build_info
 from core.voicemeeter_ctrl import EDITIONS, VoicemeeterController, edition
 from ui import styles
 from ui.main_window import MainWindow, launch_restart
@@ -57,6 +60,7 @@ BRIDGE_PING_TIMEOUT_S = 1.0  # attente d'un battement de cœur du pont
 BRIDGE_RETRY_S = 0.5         # pause entre deux attentes
 STARTUP_CANCEL_WAIT_MS = 5000
 RESTART_WAIT_MS = 45000      # --restart : attente de la fin de l'instance précédente
+OLD_EXE_RETRY_MS = 20000     # après une mise à jour : nouvel essai de suppression de l'ancien exe
 SHOW_REQUEST_TIMEOUT_MS = 1500  # 2e lancement : demande à l'instance ouverte de s'afficher
 CLOSING_WAIT_MS = 20000      # 2e lancement pendant la fermeture de l'instance : on l'attend
 WINDOWS_APP_ID = "REKA.Console"
@@ -317,6 +321,7 @@ class MixerApp:
         self._processes = ProcessManager(cfg)
         self._vm = VoicemeeterController(cfg)
         self._reaper = ReaperController(cfg)
+        self._updater = UpdateChecker(cfg, load_build_info())
         self._splash = SplashScreen()
         self._worker: StartupWorker | None = None
         self._window: MainWindow | None = None
@@ -353,7 +358,8 @@ class MixerApp:
         try:
             config.save_config(self._cfg)  # chemins auto-détectés mémorisés
             self._window = MainWindow(cfg=self._cfg, vm=self._vm,
-                                      reaper=self._reaper, processes=self._processes)
+                                      reaper=self._reaper, processes=self._processes,
+                                      apps=create_backend(self._cfg), updater=self._updater)
         except Exception as exc:
             # Sans fenêtre, l'app tournerait à vide : on prévient et on quitte
             log.exception("Impossible de créer la fenêtre principale")
@@ -601,10 +607,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def run_demo(app: QApplication, cfg: dict, selftest: str | None) -> int:
     """Console avec des moteurs simulés ; avec --selftest, capture puis quitte."""
+    from core.app_volume import DemoAppVolumes
     from core.demo import DemoProcesses, DemoReaper, DemoVoicemeeter
 
     vm, reaper, processes = DemoVoicemeeter(cfg), DemoReaper(cfg), DemoProcesses()
-    window = MainWindow(cfg=cfg, vm=vm, reaper=reaper, processes=processes, persist=False)
+    window = MainWindow(cfg=cfg, vm=vm, reaper=reaper, processes=processes, persist=False,
+                        apps=DemoAppVolumes())
     if selftest is None:
         app.setQuitOnLastWindowClosed(True)
         window.show()
@@ -666,6 +674,26 @@ def run_selftest(app: QApplication, cfg: dict, window: MainWindow, vm, reaper, p
         capture(image.with_name(f"{image.stem}_{suffix}{image.suffix}"), settings)
     for widget in (settings, vst, project, splash):
         widget.hide()
+
+    # Volume par application (moteur simulé) : fenêtre « Apps » de la strip Appels
+    apps_strip = next((s for s in window.strips if s.apps is not None), None)
+    if apps_strip is None:
+        problems.append("aucun bouton « Apps » sur les strips virtuelles")
+    else:
+        window.open_app_mixer(apps_strip.index)
+        pump(0.4)
+        popup = window._app_mixer
+        if popup is None or not popup.rows:
+            problems.append("fenêtre « Apps » vide")
+        else:
+            capture(image.with_name(f"{image.stem}_apps{image.suffix}"), popup)
+            popup.close()
+            pump(0.1)
+    problems.extend(_selftest_app_volume(report))
+
+    # Mises à jour : infos du build embarquées, fenêtre de mise à jour, accès en ligne
+    problems.extend(_selftest_updates(report, window, pump, capture, image))
+
     # Thème de couleur appliqué à chaud (violet), puis retour au thème d'origine
     ui_cfg = cfg.setdefault("ui", {})
     original = ui_cfg.get("theme", styles.DEFAULT_THEME)
@@ -683,6 +711,53 @@ def run_selftest(app: QApplication, cfg: dict, window: MainWindow, vm, reaper, p
     image.with_suffix(".txt").write_text("\n".join(report) + "\n", encoding="utf-8")
     log.info("Auto-test : %s", " | ".join(report))
     return 1 if problems else 0
+
+
+def _selftest_app_volume(report: list[str]) -> list[str]:
+    """Sous Windows (exe compris) : le moteur réel du volume par application se charge."""
+    if sys.platform != "win32":
+        return []
+    try:
+        from core.app_volume import WindowsAppVolumes
+    except Exception as exc:          # module absent de l'exe : vrai problème de build
+        return [f"volume par application : {exc}"]
+    try:
+        backend = WindowsAppVolumes()
+        found = [backend.device_name(i) for i in range(3)]
+        report.append("OK  volume par application : "
+                      f"{sum(1 for name in found if name)} entrée(s) Voicemeeter trouvée(s)")
+    except ModuleNotFoundError as exc:
+        return [f"volume par application : {exc}"]
+    except Exception as exc:          # pas de service audio sur la machine de build
+        report.append(f"INFO volume par application : {exc}")
+    return []
+
+
+def _selftest_updates(report: list[str], window: MainWindow, pump, capture, image: Path) -> list[str]:
+    from core.updater import UpdateInfo, fetch_update, version_url
+    from ui.update_dialog import UpdateDialog
+
+    problems = []
+    build = load_build_info()
+    report.append(f"Build : {build.describe()} — {build.repo} / {build.tag}" if build
+                  else "Build : version de développement (pas de build_info.json)")
+    if getattr(sys, "frozen", False) and build is None:
+        problems.append("build_info.json absent de l'exe")
+    fake = UpdateInfo("9.9.9", (build.build if build else 0) + 1, "", "https://example.invalid/REKA.exe",
+                      "0" * 64, 1, "Exemple de notes de version", "")
+    dialog = UpdateDialog(fake, build, window, self_update=True)
+    dialog.show()
+    pump(0.3)
+    capture(image.with_name(f"{image.stem}_maj{image.suffix}"), dialog)
+    dialog.hide()
+    url = version_url({}, build)
+    if url is not None:               # non bloquant : réseau de la machine de build
+        try:
+            online = fetch_update(url)
+            report.append(f"INFO mise à jour en ligne : {online.describe()}")
+        except Exception as exc:
+            report.append(f"INFO mise à jour en ligne : {exc}")
+    return problems
 
 
 def main() -> int:
@@ -730,6 +805,9 @@ def main() -> int:
             return 0
     if args.restart:
         cfg = config.load_config()   # relue : l'ancienne instance a pu l'écrire en partant
+    # Après une mise à jour : l'ancien exe (encore verrouillé un instant) est supprimé
+    if not cleanup_previous():
+        QTimer.singleShot(OLD_EXE_RETRY_MS, cleanup_previous)
 
     mixer = MixerApp(app, cfg, log_path)
     server = listen_for_show_requests(mixer.show_window)

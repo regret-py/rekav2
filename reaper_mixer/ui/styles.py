@@ -548,4 +548,41 @@ QRadioButton::indicator:checked {{
 QLabel#credits {{
     color: {TEXT_SECONDARY};
 }}
+
+/* ---- volume par application ---- */
+QLabel#appMixerTitle {{
+    color: {TEXT_PRIMARY};
+    font-size: 13px;
+    font-weight: 600;
+}}
+QLabel#appMixerHint {{
+    color: {TEXT_SECONDARY};
+    font-size: 10px;
+}}
+QLabel#appName {{
+    color: {TEXT_PRIMARY};
+    font-weight: 500;
+}}
+QLabel#appName:disabled {{
+    color: {TEXT_MUTED};
+}}
+QLabel#appPercent {{
+    color: {TEXT_SECONDARY};
+    font-size: 10px;
+}}
+
+/* ---- mises à jour ---- */
+QProgressBar {{
+    background: {BUTTON_BG};
+    border: 1px solid {BORDER_COLUMN};
+    border-radius: 5px;
+    height: 10px;
+    text-align: center;
+    color: {TEXT_PRIMARY};
+    font-size: 10px;
+}}
+QProgressBar::chunk {{
+    background: {GREEN_NEON};
+    border-radius: 4px;
+}}
 """

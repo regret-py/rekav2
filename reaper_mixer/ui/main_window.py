@@ -5,6 +5,9 @@ câblage entre l'interface et les moteurs (Voicemeeter, REAPER, processus).
 Fenêtre « comme Voicemeeter » : taille compacte par défaut (strips + master,
 sans grand vide), position et taille mémorisées, réduction possible dans la
 zone de notification (icône à côté de l'horloge).
+
+Aussi : volume par application (bouton « Apps » des strips virtuelles) et
+mises à jour (vérification au démarrage puis régulière, pill dans le Master).
 """
 
 from __future__ import annotations
@@ -18,15 +21,20 @@ from PySide6.QtCore import QByteArray, QEvent, QPointF, QProcess, QPropertyAnima
 from PySide6.QtGui import QAction, QColor, QPainter, QPixmap, QRadialGradient
 from PySide6.QtWidgets import (QApplication, QGraphicsOpacityEffect, QHBoxLayout, QLabel,
                                QMainWindow, QMenu, QMessageBox, QSystemTrayIcon, QWidget)
+from shiboken6 import delete as delete_now
 
 from core import config
+from core.app_volume import AppVolumeBackend, NullAppVolumes
 from core.process_manager import is_blank_project, reaper_project
+from core.updater import UpdateChecker, UpdateInfo
 from core.voicemeeter_ctrl import DEFAULT_ROUTING, MixerLevels, MixerParams
 from ui import styles
+from ui.app_mixer import AppMixerPopup
 from ui.master_widget import MasterWidget
 from ui.project_dialog import ProjectDialog
 from ui.settings_dialog import SettingsDialog
 from ui.strip_widget import StripWidget
+from ui.update_dialog import UpdateDialog
 from ui.vst_dialog import VstDialog
 
 log = logging.getLogger(__name__)
@@ -42,6 +50,9 @@ TITLE_BAR_ALLOWANCE = 40      # barre de titre Windows (le cadre n'est connu qu'
 LAYOUT_VERSION = 2
 DEFAULT_DARKNESS = 0.45       # assombrissement de l'image d'arrière-plan
 DEFAULT_PANEL_OPACITY = 1.0
+APP_COUNT_MS = 2000           # nombre d'applications affiché sur les boutons « Apps »
+UPDATE_FIRST_CHECK_MS = 8000  # première vérification des mises à jour après l'ouverture
+DEFAULT_UPDATE_HOURS = 6
 
 
 def background_image_path(cfg: dict) -> Path | None:
@@ -179,6 +190,7 @@ class Toast(QLabel):
 
 class MainWindow(QMainWindow):
     def __init__(self, cfg: dict, vm, reaper, processes, persist: bool = True,
+                 apps: AppVolumeBackend | None = None, updater: UpdateChecker | None = None,
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._cfg = cfg
@@ -186,6 +198,10 @@ class MainWindow(QMainWindow):
         self._vm = vm
         self._reaper = reaper
         self._processes = processes
+        self._apps = apps or NullAppVolumes()
+        self._updater = updater
+        self._update: UpdateInfo | None = None
+        self._app_mixer: AppMixerPopup | None = None
         self._params: MixerParams | None = None
         self._vm_ok = True
         self._reaper_ok = reaper.is_connected
@@ -210,9 +226,11 @@ class MainWindow(QMainWindow):
         self.strips: list[StripWidget] = []
         for index in range(vm.strip_count):
             name = names[index] if index < len(names) else f"Strip {index + 1}"
+            virtual = vm.virtual_input(index)
             strip = StripWidget(index, name, labels, sends_adjustable=sends,
                                 pad_modes=vm.pad_modes(index), physical=vm.is_physical(index),
-                                pad_mode=pad_modes[index] if index < len(pad_modes) else None)
+                                pad_mode=pad_modes[index] if index < len(pad_modes) else None,
+                                apps_button=self._apps.available and virtual is not None)
             self._wire_strip(strip)
             layout.addWidget(strip)
             self.strips.append(strip)
@@ -223,6 +241,7 @@ class MainWindow(QMainWindow):
         self.master.settingsRequested.connect(self.open_settings)
         self.master.projectRequested.connect(self.choose_project)
         self.master.minimizeRequested.connect(self.minimize)
+        self.master.updateRequested.connect(self.open_update)
         layout.addWidget(self.master)
 
         self.toast = Toast(self.background)
@@ -254,6 +273,28 @@ class MainWindow(QMainWindow):
             vm.set_label(strip.index, strip.strip_name())
         vm.start_polling()
 
+        # Volume par application : nombre d'applications sur chaque bouton « Apps »
+        self._app_timer = QTimer(self)
+        self._app_timer.setInterval(APP_COUNT_MS)
+        self._app_timer.timeout.connect(self.refresh_app_counts)
+        if any(strip.apps is not None for strip in self.strips):
+            self._app_timer.start()
+            QTimer.singleShot(0, self.refresh_app_counts)
+
+        # Mises à jour : au démarrage (option), puis régulièrement
+        self._update_timer = QTimer(self)
+        if updater is not None:
+            updater.available.connect(self._on_update_available)
+            hours = float(cfg.get("update", {}).get("interval_hours", DEFAULT_UPDATE_HOURS) or 0)
+            if cfg.get("update", {}).get("check_on_start", True) and updater.enabled:
+                QTimer.singleShot(UPDATE_FIRST_CHECK_MS, updater.check)
+                if hours > 0:
+                    self._update_timer.setInterval(int(hours * 3600 * 1000))
+                    self._update_timer.timeout.connect(updater.check)
+                    self._update_timer.start()
+            if updater.latest is not None:
+                self._on_update_available(updater.latest)
+
     # ---------------------------------------------------------- câblage
     def _wire_strip(self, strip: StripWidget) -> None:
         vm, reaper = self._vm, self._reaper
@@ -263,6 +304,7 @@ class MainWindow(QMainWindow):
         strip.sendChanged.connect(vm.set_send)
         strip.padMoved.connect(vm.set_pad)
         strip.padModeChanged.connect(self._on_pad_mode)
+        strip.appsRequested.connect(self.open_app_mixer)
         strip.renamed.connect(self._on_renamed)
         strip.chainToggled.connect(reaper.set_chain_enabled)
         strip.fxAddRequested.connect(self.add_effect)
@@ -348,6 +390,62 @@ class MainWindow(QMainWindow):
         modes.extend([None] * (index + 1 - len(modes)))
         modes[index] = mode
 
+    # ------------------------------------------------- volume par application
+    def refresh_app_counts(self) -> None:
+        if not self.isVisible() or self.isMinimized():
+            return
+        for strip in self.strips:
+            if strip.apps is not None:
+                index = self._vm.virtual_input(strip.index)
+                strip.apps.set_count(len(self._apps.apps(index)) if index is not None else 0)
+
+    def open_app_mixer(self, index: int) -> None:
+        strip = self.strips[index]
+        virtual = self._vm.virtual_input(index)
+        if virtual is None or strip.apps is None:
+            return
+        if self._app_mixer is not None:
+            self._app_mixer.close()
+        self._app_mixer = AppMixerPopup(self._apps, virtual, strip.strip_name(), self)
+        self._app_mixer.destroyed.connect(self._on_app_mixer_closed)
+        self._app_mixer.show_under(strip.apps)
+
+    def _on_app_mixer_closed(self) -> None:
+        self._app_mixer = None
+        QTimer.singleShot(0, self.refresh_app_counts)
+
+    # ------------------------------------------------------- mises à jour
+    def _on_update_available(self, update: UpdateInfo) -> None:
+        skipped = int(self._cfg.get("update", {}).get("skipped_build", 0) or 0)
+        if update.build == skipped and self._update is None:
+            return
+        first = self._update is None or self._update.build != update.build
+        self._update = update
+        self.master.set_update(update.version)
+        if first:
+            self.toast.show_message(f"REKA {update.version} est disponible : "
+                                    "clique sur « Mise à jour » dans le panneau Master.")
+            if self._tray is not None and not self.isVisible():
+                self._tray.showMessage(config.APP_NAME, f"REKA {update.version} est disponible.",
+                                       self.windowIcon(), 5000)
+
+    def open_update(self) -> None:
+        # Mise à jour signalée, ou trouvée par une recherche manuelle (même ignorée)
+        update = self._update or (self._updater.latest if self._updater is not None else None)
+        if update is None:
+            return
+        dialog = UpdateDialog(update, self._updater.build if self._updater else None, self)
+        dialog.exec()
+        skipped, installed = dialog.skipped, dialog.installed
+        delete_now(dialog)        # tout de suite : pas de suppression différée en suspens
+        if skipped:
+            self._cfg.setdefault("update", {})["skipped_build"] = update.build
+            self._save_config()
+            self._update = None
+            self.master.set_update(None)
+        elif installed:
+            self.restart_app()
+
     def _on_renamed(self, index: int, name: str) -> None:
         names = self._cfg.setdefault("ui", {}).setdefault("strip_names", [])
         while len(names) <= index:
@@ -385,7 +483,7 @@ class MainWindow(QMainWindow):
 
     def open_settings(self) -> None:
         dialog = SettingsDialog(self._cfg, self._processes, self._reaper, self._vm, self,
-                                persist=self._persist)
+                                persist=self._persist, updater=self._updater)
         dialog.optionsChanged.connect(lambda: self._on_tracks(self._tracks))
         dialog.projectRequested.connect(self.choose_project)
         dialog.appearanceChanged.connect(self.apply_appearance)
@@ -394,10 +492,16 @@ class MainWindow(QMainWindow):
         restart = []
         dialog.restartRequested.connect(lambda: restart.append(True))
         dialog.restartRequested.connect(dialog.accept)
+        # « Installer la mise à jour » (onglet À propos) : après la fermeture des réglages
+        update = []
+        dialog.updateRequested.connect(lambda: update.append(True))
+        dialog.updateRequested.connect(dialog.accept)
         dialog.exec()
-        dialog.deleteLater()
+        delete_now(dialog)        # tout de suite : pas de suppression différée en suspens
         if restart:
             self.restart_app()
+        elif update:
+            self.open_update()
 
     # ------------------------------------------------------------ apparence
     def apply_appearance(self) -> None:
