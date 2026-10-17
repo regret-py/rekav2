@@ -79,7 +79,8 @@ _THEMED = ("BG_PANEL", "BG_PILL", "GREEN_NEON", "GREEN_BRIGHT", "GREEN_DIM", "GR
            "BUTTON_BG", "BUTTON_HOVER", "PILL_BG", "PILL_BORDER", "KNOB_CAP_TOP",
            "KNOB_CAP_BOTTOM", "BG_DEEP", "ON_ACCENT", "ON_ACCENT_DARK", "BADGE_OFF")
 _BASE = {name: globals()[name] for name in _THEMED}
-MIN_ACCENT_LIGHTNESS = 0.42   # un accent trop sombre serait invisible sur le fond
+MIN_ACCENT_CONTRAST = 4.5     # contraste minimal accent / fond (lisibilité, WCAG AA)
+HOVER_TOWARD_WHITE = 0.22     # survol des boutons principaux : accent éclairci
 _current_theme = DEFAULT_THEME
 
 FONT_FAMILY = "Inter"
@@ -123,6 +124,25 @@ def theme_accent(theme: str | None) -> QColor | None:
     return accent if str(theme or "").startswith("#") and accent.isValid() else None
 
 
+def luminance(color: QColor) -> float:
+    """Luminance relative (WCAG) d'une couleur."""
+    def channel(value: int) -> float:
+        v = value / 255
+        return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+    return 0.2126 * channel(color.red()) + 0.7152 * channel(color.green()) + 0.0722 * channel(color.blue())
+
+
+def contrast(a: QColor, b: QColor) -> float:
+    high, low = sorted((luminance(a), luminance(b)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
+def _mix(a: QColor, b: QColor, amount: float) -> QColor:
+    return QColor(round(a.red() + (b.red() - a.red()) * amount),
+                  round(a.green() + (b.green() - a.green()) * amount),
+                  round(a.blue() + (b.blue() - a.blue()) * amount))
+
+
 def _rotate(value: str, hue_shift: float, saturation: float) -> str:
     h, s, l, _a = QColor(value).getHslF()
     if h < 0:                        # gris pur : pas de teinte à tourner
@@ -140,14 +160,22 @@ def set_theme(theme: str | None) -> str:
     values = dict(_BASE)
     if theme != DEFAULT_THEME:
         ah, as_, al, _ = accent.getHslF()
-        if al < MIN_ACCENT_LIGHTNESS:
-            accent = QColor.fromHslF(max(ah, 0.0), as_, MIN_ACCENT_LIGHTNESS)
-            ah, as_, al, _ = accent.getHslF()
         bh, bs, _bl, _ = QColor(_BASE["GREEN_NEON"]).getHslF()
         shift = ah - bh if ah >= 0 else 0.0
         saturation = as_ / bs if ah >= 0 and bs > 0 else 0.0
         values = {name: _rotate(value, shift, saturation) for name, value in _BASE.items()}
+        # Accent assez clair pour se lire sur les fonds (un bleu pur #0000ff serait
+        # presque invisible) : on l'éclaircit jusqu'au contraste voulu
+        background = QColor(values["BG_COLUMN"])
+        while contrast(accent, background) < MIN_ACCENT_CONTRAST and al < 0.95:
+            al = min(0.95, al + 0.02)
+            accent = QColor.fromHslF(max(ah, 0.0), as_, al)
         values["GREEN_NEON"] = values["GREEN_TEXT"] = accent.name()
+        # Survol des boutons principaux : dérivé de l'accent (le texte sombre
+        # reste lisible), et non de la teinte voisine de la palette verte
+        values["GREEN_BRIGHT"] = _mix(accent, QColor("#ffffff"), HOVER_TOWARD_WHITE).name()
+        if contrast(accent, QColor(values["ON_ACCENT"])) < 4.5:   # « FX » du badge allumé
+            values["ON_ACCENT"] = values["ON_ACCENT_DARK"]
     globals().update(values)
     _current_theme = theme
     return theme

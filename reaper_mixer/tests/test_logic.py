@@ -411,8 +411,13 @@ def test_color_themes(qapp):
         assert abs(QColor(styles.GREEN_DIM).hslHueF() - violet_hue) < 0.05   # teintes tournées
         assert styles.RED_MUTE == "#ff2d2d" and styles.YELLOW_VU == "#ffcc00"
         assert styles.THEMES["violet"][1] in styles.build_stylesheet()
+        for theme in [*styles.THEMES, "#0000ff", "#123456", "#3a0050"]:   # lisibilité
+            styles.set_theme(theme)
+            accent, hover = QColor(styles.GREEN_NEON), QColor(styles.GREEN_BRIGHT)
+            ink = QColor(styles.ON_ACCENT_DARK)
+            assert styles.contrast(accent, QColor(styles.BG_COLUMN)) >= styles.MIN_ACCENT_CONTRAST
+            assert styles.contrast(accent, ink) >= 4.5 and styles.contrast(hover, ink) >= 4.5, theme
         assert styles.set_theme("#123456") == "#123456"            # personnalisé, éclairci
-        assert QColor(styles.GREEN_NEON).lightnessF() >= styles.MIN_ACCENT_LIGHTNESS - 0.01
         assert styles.set_theme("n'importe quoi") == styles.DEFAULT_THEME
         assert styles.GREEN_DIM == base_dim and styles.GREEN_NEON == "#00ff88"
     finally:

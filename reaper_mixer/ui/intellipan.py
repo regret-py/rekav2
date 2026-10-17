@@ -108,7 +108,7 @@ class IntelliPad(QWidget):
     def mousePressEvent(self, event) -> None:  # noqa: N802
         pos = event.position()
         if event.button() == Qt.MouseButton.RightButton:
-            self._show_menu(event.globalPosition().toPoint())
+            self._show_menu(event.globalPosition().toPoint())   # interrompt un glisser
             return
         if event.button() != Qt.MouseButton.LeftButton:
             return
@@ -122,8 +122,13 @@ class IntelliPad(QWidget):
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         pos = event.position()
         if self._dragging:
-            self._move_to(pos)
-            return
+            if event.buttons() & Qt.MouseButton.LeftButton:
+                self._move_to(pos)
+                return
+            # Relâchement jamais reçu (menu ouvert pendant le glisser) : fin du glisser,
+            # sinon le simple survol déplacerait le cube
+            self._dragging = False
+            self.update()
         over = self._header().contains(pos) and len(self._modes) > 1
         if over != self._hover_header:
             self._hover_header = over
@@ -161,6 +166,8 @@ class IntelliPad(QWidget):
         self.moved.emit(self._mode, x, y)
 
     def _show_menu(self, where) -> None:
+        # Le menu capte la souris : le relâchement du bouton gauche n'arrivera pas ici
+        self._dragging = False
         menu = QMenu(self)
         for mode in self._modes:
             action = QAction(PAD_MODES[mode].title, menu)

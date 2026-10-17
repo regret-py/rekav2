@@ -362,22 +362,82 @@ def test_tray_double_click_and_restore_maximized(qapp, mixer):
     window._on_tray_activated(reason.DoubleClick)    # … puis DoubleClick
     pump(qapp, 0.05)
     assert window.isVisible() and window.isMaximized()
-    window.showNormal()
+
+    window.showMinimized()                           # bouton « _ » de la barre de titre
+    pump(qapp, 0.1)
+    assert not window.isVisible()                    # → zone de notification
     window.show_from_tray()
+    pump(qapp, 0.05)
+    assert window.isVisible() and window.isMaximized() and not window.isMinimized()
+
+    window._cfg["ui"]["minimize_to_tray"] = False    # sans zone de notification
+    window._on_tray_activated(reason.Trigger)
+    window._on_tray_activated(reason.DoubleClick)
+    pump(qapp, 0.05)
+    assert window.isVisible() and window.isMaximized() and not window.isMinimized()
+    window.showNormal()
+
+
+def test_restart_failure_is_reported(qapp, monkeypatch):
+    from ui import main_window
+
+    monkeypatch.setattr(main_window, "restart_command",
+                        lambda: ("/chemin/introuvable/REKA.exe", ["--restart"]))
+    assert main_window.launch_restart() is False
+
+
+def test_pad_drag_stops_when_button_released_elsewhere(qapp, mixer):
+    window, vm, _ = mixer
+    pad = window.strips[1].pad
+    area = pad._area()
+    moves = []
+    pad.moved.connect(lambda *args: moves.append(args))
+    send(pad, QEvent.Type.MouseButtonPress, (area.center().x(), area.center().y()))
+    assert pad.isInteracting()
+    moves.clear()
+    # Relâchement jamais reçu (menu ouvert pendant le glisser) : survol sans bouton
+    send(pad, QEvent.Type.MouseMove, (area.left() + 2, area.top() + 2), NONE, NONE)
+    send(pad, QEvent.Type.MouseMove, (area.right() - 2, area.top() + 2), NONE, NONE)
+    assert moves == [] and not pad.isInteracting()
+
+
+def _request_show_in_subprocess(qapp) -> str:
+    """Lance request_show() dans un autre processus (comme un 2e REKA.exe) en
+    laissant tourner la boucle Qt d'ici, qui doit lui répondre."""
+    import os
+    import subprocess
+    import sys
+    import time
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    proc = subprocess.Popen([sys.executable, "-c", "import main; print(main.request_show())"],
+                            cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            env={**os.environ, "QT_QPA_PLATFORM": "offscreen"}, text=True)
+    deadline = time.monotonic() + 30
+    while proc.poll() is None and time.monotonic() < deadline:
+        pump(qapp, 0.05)
+    out, _ = proc.communicate(timeout=10)
+    return out.strip().splitlines()[-1] if out.strip() else ""
 
 
 def test_second_launch_shows_window(qapp):
     import main
 
+    answers = [True, False]                          # ouverte, puis en train de se fermer
     shown = []
-    server = main.listen_for_show_requests(lambda: shown.append(True))
+
+    def on_show():
+        shown.append(True)
+        return answers.pop(0)
+
+    server = main.listen_for_show_requests(on_show)
     try:
-        assert main.request_show()
-        pump(qapp, 0.3)
-        assert shown
+        assert _request_show_in_subprocess(qapp) == "True" and shown == [True]
+        assert _request_show_in_subprocess(qapp) == "False"   # « closing » : on attendra
     finally:
         server.close()
-    assert not main.request_show()                   # plus personne n'écoute
+    assert _request_show_in_subprocess(qapp) == "False"       # plus personne n'écoute
 
 
 def test_banana_keeps_potato_sends_and_blank_project(qapp, cfg):

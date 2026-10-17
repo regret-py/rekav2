@@ -58,6 +58,7 @@ BRIDGE_RETRY_S = 0.5         # pause entre deux attentes
 STARTUP_CANCEL_WAIT_MS = 5000
 RESTART_WAIT_MS = 45000      # --restart : attente de la fin de l'instance précédente
 SHOW_REQUEST_TIMEOUT_MS = 1500  # 2e lancement : demande à l'instance ouverte de s'afficher
+CLOSING_WAIT_MS = 20000      # 2e lancement pendant la fermeture de l'instance : on l'attend
 WINDOWS_APP_ID = "REKA.Console"
 
 
@@ -465,11 +466,20 @@ class MixerApp:
             QMessageBox.information(None, config.APP_NAME,
                                     "Édition enregistrée : relance REKA pour l'utiliser.")
 
-    def show_window(self) -> None:
-        """REKA relancée alors qu'elle tourne déjà (cachée près de l'horloge) :
-        on ré-affiche la fenêtre."""
+    def show_window(self) -> bool:
+        """REKA relancée alors qu'elle tourne déjà (cachée près de l'horloge…) :
+        on ré-affiche la fenêtre, ou ce qui est à l'écran pendant le démarrage
+        (écran de chargement, message d'erreur). False si l'app se ferme."""
+        if self._stopped:
+            return False
         if self._window is not None:
             self._window.show_from_tray()
+            return True
+        front = QApplication.activeModalWidget() or (self._splash if self._splash.isVisible() else None)
+        if front is not None:
+            front.raise_()
+            front.activateWindow()
+        return True
 
     def _ask_retry(self, exc: Exception) -> bool:
         box = QMessageBox()
@@ -531,18 +541,27 @@ def _instance_name() -> str:
 
 
 def request_show() -> bool:
-    """Demande à l'instance déjà ouverte de s'afficher ; False si elle ne répond pas."""
+    """Demande à l'instance déjà ouverte de s'afficher ; True si elle a répondu
+    qu'elle s'affiche (False : pas d'instance, ou instance en train de se fermer)."""
+    if sys.platform == "win32":
+        # Windows ne laisse passer une fenêtre au premier plan que si le
+        # processus au premier plan (celui-ci, lancé par l'utilisateur) l'autorise
+        import ctypes
+        ctypes.windll.user32.AllowSetForegroundWindow(-1)   # ASFW_ANY
     socket = QLocalSocket()
     socket.connectToServer(_instance_name())
     if not socket.waitForConnected(SHOW_REQUEST_TIMEOUT_MS):
         return False
     socket.write(b"show\n")
     socket.waitForBytesWritten(SHOW_REQUEST_TIMEOUT_MS)
+    reply = b""
+    while b"\n" not in reply and socket.waitForReadyRead(SHOW_REQUEST_TIMEOUT_MS):
+        reply += bytes(socket.readAll())
     socket.disconnectFromServer()
-    return True
+    return reply.startswith(b"ok")
 
 
-def listen_for_show_requests(on_show: Callable[[], None]) -> QLocalServer:
+def listen_for_show_requests(on_show: Callable[[], bool]) -> QLocalServer:
     server = QLocalServer()
     server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)
     name = _instance_name()
@@ -556,8 +575,9 @@ def listen_for_show_requests(on_show: Callable[[], None]) -> QLocalServer:
         while server.hasPendingConnections():
             connection = server.nextPendingConnection()
             connection.disconnected.connect(connection.deleteLater)
+            connection.write(b"ok\n" if on_show() else b"closing\n")
+            connection.flush()
             connection.disconnectFromServer()
-        on_show()
 
     server.newConnection.connect(on_connection)
     return server
@@ -695,14 +715,19 @@ def main() -> int:
     # Après un redémarrage, on laisse à l'ancienne instance le temps de s'arrêter.
     lock = QLockFile(str(config.app_data_dir() / "instance.lock"))
     if not lock.tryLock(RESTART_WAIT_MS if args.restart else 100):
-        if not request_show():
+        if request_show():
+            return 0              # l'instance ouverte s'est affichée
+        # Pas de réponse : elle est sans doute en train de se fermer, on l'attend
+        if not lock.tryLock(CLOSING_WAIT_MS):
             QMessageBox.information(None, config.APP_NAME, f"{config.APP_NAME} est déjà ouvert.")
-        return 0
+            return 0
     if args.restart:
         cfg = config.load_config()   # relue : l'ancienne instance a pu l'écrire en partant
 
     mixer = MixerApp(app, cfg, log_path)
     server = listen_for_show_requests(mixer.show_window)
+    # Fermeture : plus de réponse aux nouveaux lancements (ils attendront le verrou)
+    app.aboutToQuit.connect(server.close)
     app.aboutToQuit.connect(mixer.shutdown)
     mixer.start()
     exit_code = app.exec()

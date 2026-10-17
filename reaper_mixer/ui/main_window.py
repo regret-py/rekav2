@@ -36,6 +36,7 @@ FOCUS_PLUGIN_DELAY_MS = 400
 TOAST_MS = 4500
 COMPACT_HEIGHT = 860          # hauteur de la fenêtre compacte (comme Voicemeeter)
 MIN_HEIGHT = 680
+TITLE_BAR_ALLOWANCE = 40      # barre de titre Windows (le cadre n'est connu qu'une fois affiché)
 # Augmenté quand la disposition des strips change (0.4 : Intellipan) : la
 # taille mémorisée, prévue pour l'ancienne disposition, est alors ignorée.
 LAYOUT_VERSION = 2
@@ -64,7 +65,11 @@ def launch_restart() -> bool:
     # se croirait un sous-processus de celle-ci et réutiliserait son dossier
     # temporaire, supprimé dès que cette instance se ferme.
     os.environ["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
-    if not QProcess.startDetached(program, args):
+    result = QProcess.startDetached(program, args)
+    # PySide6 renvoie (succès, pid) ; d'autres versions un simple booléen
+    started = result[0] if isinstance(result, tuple) else bool(result)
+    if not started:
+        log.error("Impossible de relancer REKA : %s %s", program, " ".join(args))
         return False
     log.info("Redémarrage de REKA : %s %s", program, " ".join(args))
     return True
@@ -186,7 +191,6 @@ class MainWindow(QMainWindow):
         self._reaper_ok = reaper.is_connected
         self._device_warned = False
         self._tray_hint_shown = False
-        self._restore_maximized = False
         self._tracks: list = reaper.strip_tracks   # piste REAPER de chaque strip (ou None)
 
         ui_cfg = cfg.setdefault("ui", {})
@@ -423,30 +427,39 @@ class MainWindow(QMainWindow):
 
     def _restore_geometry(self) -> None:
         width, _ = self.compact_size()
-        self.setMinimumSize(width, MIN_HEIGHT)
+        # Hauteur minimale : celle prévue, sauf sur un petit écran (1280×720 logiques
+        # à 150 %) où elle doit tenir au-dessus de la barre des tâches
+        layout_min = self.background.layout().minimumSize().height()
+        area = self._screen_area()
+        fit = area.height() - TITLE_BAR_ALLOWANCE if area is not None else MIN_HEIGHT
+        self.setMinimumSize(width, max(layout_min, min(MIN_HEIGHT, fit)))
         ui_cfg = self._cfg.setdefault("ui", {})
         saved = ui_cfg.get("geometry")
-        same_layout = ui_cfg.get("layout_version") == LAYOUT_VERSION
-        ui_cfg["layout_version"] = LAYOUT_VERSION
-        if saved and same_layout and self.restoreGeometry(QByteArray.fromBase64(saved.encode("ascii"))):
+        if ui_cfg.get("layout_version") != LAYOUT_VERSION:
+            saved = None          # taille prévue pour l'ancienne disposition des strips
+        if saved and self.restoreGeometry(QByteArray.fromBase64(saved.encode("ascii"))):
             return
         self.reset_window_size()
 
+    def _screen_area(self):
+        screen = self.screen() or QApplication.primaryScreen()
+        return screen.availableGeometry() if screen is not None else None
+
     def reset_window_size(self) -> None:
-        """Fenêtre compacte, centrée sur l'écran."""
+        """Fenêtre compacte, centrée dans l'espace libre de l'écran (barre des
+        tâches exclue), barre de titre comprise."""
         if self.isVisible():
             self.showNormal()
         width, height = self.compact_size()
-        screen = self.screen() or QApplication.primaryScreen()
-        if screen is not None:
-            area = screen.availableGeometry()
-            height = min(height, area.height() - 60)
+        area = self._screen_area()
+        if area is None:
             self.resize(width, height)
-            frame = self.frameGeometry()
-            frame.moveCenter(area.center())
-            self.move(frame.topLeft())
-        else:
-            self.resize(width, height)
+            return
+        height = max(self.minimumHeight(), min(height, area.height() - TITLE_BAR_ALLOWANCE))
+        self.resize(width, height)
+        left = area.x() + max(0, (area.width() - self.frameGeometry().width()) // 2)
+        top = area.y() + max(0, (area.height() - height - TITLE_BAR_ALLOWANCE) // 2)
+        self.move(left, top)
 
     def minimize(self) -> None:
         """Réduit REKA : dans la zone de notification si l'option est active
@@ -454,9 +467,7 @@ class MainWindow(QMainWindow):
         if self._to_tray():
             # Fenêtre cachée : fermer une popup ne doit pas quitter REKA
             QApplication.setQuitOnLastWindowClosed(False)
-            if self.isVisible() and not self.isMinimized():
-                self._restore_maximized = self.isMaximized()
-            self.hide()
+            self.hide()           # l'état « agrandie » est conservé par Qt
             if not self._tray_hint_shown:
                 self._tray_hint_shown = True
                 self._tray.showMessage(config.APP_NAME, "REKA continue de tourner ici. "
@@ -466,10 +477,12 @@ class MainWindow(QMainWindow):
             self.showMinimized()
 
     def show_from_tray(self) -> None:
-        if self._restore_maximized:
-            self.showMaximized()
-        else:
-            self.showNormal()
+        """Ré-affiche la fenêtre (zone de notification, barre des tâches, second
+        lancement) dans son état d'avant : agrandie si elle l'était."""
+        if not self.isVisible() or self.isMinimized():
+            # Qt garde WindowMaximized pendant la réduction : on n'enlève que « réduite »
+            self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)
+            self.show()
         self.raise_()
         self.activateWindow()
         QApplication.setQuitOnLastWindowClosed(True)
@@ -565,6 +578,7 @@ class MainWindow(QMainWindow):
             self._cfg["state"] = state
         ui_cfg = self._cfg.setdefault("ui", {})
         ui_cfg["geometry"] = bytes(self.saveGeometry().toBase64()).decode("ascii")
+        ui_cfg["layout_version"] = LAYOUT_VERSION    # la taille enregistrée va avec cette disposition
         for legacy in ("width", "height"):   # remplacés par « geometry »
             ui_cfg.pop(legacy, None)
         self._save_config()
