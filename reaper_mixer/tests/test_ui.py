@@ -411,13 +411,17 @@ def _request_show_in_subprocess(qapp) -> str:
     from pathlib import Path
 
     root = Path(__file__).resolve().parent.parent
-    proc = subprocess.Popen([sys.executable, "-c", "import main; print(main.request_show())"],
+    # Comme un vrai lancement : l'application Qt existe avant la demande
+    code = ("from PySide6.QtWidgets import QApplication; app = QApplication([]); "
+            "import main; print(main.request_show())")
+    proc = subprocess.Popen([sys.executable, "-c", code],
                             cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             env={**os.environ, "QT_QPA_PLATFORM": "offscreen"}, text=True)
     deadline = time.monotonic() + 30
     while proc.poll() is None and time.monotonic() < deadline:
         pump(qapp, 0.05)
     out, _ = proc.communicate(timeout=10)
+    print(out)                                       # visible si le test échoue
     return out.strip().splitlines()[-1] if out.strip() else ""
 
 

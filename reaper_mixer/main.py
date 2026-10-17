@@ -554,10 +554,17 @@ def request_show() -> bool:
         return False
     socket.write(b"show\n")
     socket.waitForBytesWritten(SHOW_REQUEST_TIMEOUT_MS)
-    reply = b""
-    while b"\n" not in reply and socket.waitForReadyRead(SHOW_REQUEST_TIMEOUT_MS):
+    # La réponse peut déjà être arrivée (tube nommé Windows, lu en arrière-plan
+    # pendant l'écriture) : on lit ce qui est là avant d'attendre la suite
+    reply = bytes(socket.readAll())
+    deadline = time.monotonic() + SHOW_REQUEST_TIMEOUT_MS / 1000
+    while b"\n" not in reply and time.monotonic() < deadline:
+        socket.waitForReadyRead(100)
         reply += bytes(socket.readAll())
-    socket.disconnectFromServer()
+        if socket.state() == QLocalSocket.LocalSocketState.UnconnectedState and not socket.bytesAvailable():
+            break
+    socket.abort()
+    log.info("Instance déjà ouverte : réponse %r", reply)
     return reply.startswith(b"ok")
 
 
