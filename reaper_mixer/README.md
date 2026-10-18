@@ -6,7 +6,7 @@ Console de mixage unique pour Windows : elle pilote **Voicemeeter Potato ou Bana
 (routing, volumes, mutes, VU-mètres) et **REAPER** (effets VST par strip), qui tournent
 tous les deux cachés en arrière-plan. L'utilisateur ne voit que la console.
 
-Développé par **Regrettable** et **Zerka**.
+Développé par **Regrettable**. Merci à **Zerka** et **Fyra** pour leur contribution.
 
 ![console](https://github.com/regret-py/rekav2/releases/download/build-claude-charming-hawking-bll4o5/console.png)
 
