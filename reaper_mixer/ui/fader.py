@@ -119,13 +119,19 @@ class Fader(QWidget):
             p.drawLine(QPointF(SCALE_W - 3, y), QPointF(SCALE_W, y))
 
         # Rail
-        rail_color = "#6b746f" if self._muted else "#b7c0bb"
+        rail_color = "#4b5263" if self._muted else "#5b6577"
         p.setPen(QPen(styles.color(rail_color, 0.85), 2, Qt.PenStyle.SolidLine,
                       Qt.PenCapStyle.RoundCap))
         p.drawLine(QPointF(rail_x, top), QPointF(rail_x, bottom))
 
-        # Curseur : carré arrondi blanc avec un « − »
+        # Remplissage accent sous le curseur (retour visuel de la position)
         cy = self._y_for(self._value)
+        if not self._muted:
+            p.setPen(QPen(styles.color(styles.GREEN_NEON, 0.9), 2, Qt.PenStyle.SolidLine,
+                          Qt.PenCapStyle.RoundCap))
+            p.drawLine(QPointF(rail_x, cy), QPointF(rail_x, bottom))
+
+        # Curseur : capuchon type console, ligne d'index à l'accent
         thumb = QRectF(rail_x - THUMB_W / 2, cy - THUMB_H / 2, THUMB_W, THUMB_H)
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(styles.color(styles.BG_BLACK, 0.45))
@@ -140,8 +146,13 @@ class Fader(QWidget):
         p.setBrush(gradient)
         p.setPen(QPen(styles.color(styles.WHITE, 0.35), 1))
         p.drawRoundedRect(thumb.adjusted(0.5, 0.5, -0.5, -0.5), 6, 6)
-        p.setPen(QPen(QColor("#2a302d"), 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-        p.drawLine(QPointF(rail_x - 4, cy), QPointF(rail_x + 4, cy))
+        if self._dragging and not self._muted:   # halo pendant la saisie
+            p.setPen(QPen(styles.color(styles.GREEN_NEON, 0.8), 1.5))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(thumb.adjusted(-1.5, -1.5, 1.5, 1.5), 7, 7)
+        index = styles.TEXT_MUTED if self._muted else styles.GREEN_NEON
+        p.setPen(QPen(QColor(index), 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawLine(QPointF(rail_x - 6, cy), QPointF(rail_x + 6, cy))
 
     # ------------------------------------------------------------ interaction
     def mousePressEvent(self, event) -> None:  # noqa: N802
@@ -154,6 +165,7 @@ class Fader(QWidget):
         self._drag_ratio = db_to_ratio(self._value)
         self._last_y = y
         self._dragging = True
+        self.update()
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         if not self._dragging:
@@ -169,6 +181,7 @@ class Fader(QWidget):
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
             self._dragging = False
+            self.update()
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:

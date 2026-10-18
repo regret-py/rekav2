@@ -336,9 +336,9 @@ def test_theme_switch_from_settings(qapp, mixer):
         assert styles.current_theme() == "#00aaff" and not dialog.theme_swatches["orange"].isChecked()
         assert "personnalisée" in dialog.theme_label.text()
     finally:
-        dialog.set_theme("neon")
+        dialog.set_theme("studio")
         dialog.done(0)
-    assert styles.GREEN_NEON == "#00ff88"
+    assert styles.GREEN_NEON == "#3b82f6"
 
 
 def test_tray_double_click_and_restore_maximized(qapp, mixer):
