@@ -152,3 +152,10 @@ jobs:
             --prerelease --target "$GITHUB_SHA" \
             --title "REKA — dernier build (toutes branches)" \
             --notes "Dernier exe construit ($GITHUB_REF_NAME, $GITHUB_SHA). REKA s'y met à jour automatiquement."
+          # Anciens exe (qui consultent encore build-<autre branche>) : leur
+          # version.json annonce aussi ce build, téléchargé depuis build-latest
+          own="build-${GITHUB_REF_NAME//\//-}"
+          gh release list --limit 100 --json tagName --jq '.[].tagName' | while read -r tag; do
+            case "$tag" in build-latest|"$own") continue ;; build-*) ;; *) continue ;; esac
+            gh release upload "$tag" dist/version.json --clobber || echo "version.json non mis à jour : $tag"
+          done
