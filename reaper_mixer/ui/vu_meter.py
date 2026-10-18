@@ -77,11 +77,14 @@ class VuMeter(QWidget):
         height = max(1.0, bottom - top)
 
         gradient = QLinearGradient(0, bottom, 0, top)
-        gradient.setColorAt(0.0, QColor(styles.GREEN_NEON))
-        gradient.setColorAt(_gradient_stop(-12), QColor(styles.GREEN_NEON))
-        gradient.setColorAt(_gradient_stop(-6), QColor(styles.YELLOW_VU))
-        gradient.setColorAt(_gradient_stop(-2), QColor(styles.RED_MUTE))
-        gradient.setColorAt(1.0, QColor(styles.RED_MUTE))
+        # Vert (niveaux normaux) → jaune (zone haute) → rouge (crêtes),
+        # couleurs fixes quel que soit le thème
+        gradient.setColorAt(0.0, QColor(styles.VU_GREEN).darker(115))
+        gradient.setColorAt(_gradient_stop(-18), QColor(styles.VU_GREEN))
+        gradient.setColorAt(_gradient_stop(-9), QColor(styles.VU_YELLOW))
+        gradient.setColorAt(_gradient_stop(-3), QColor(styles.VU_YELLOW))
+        gradient.setColorAt(_gradient_stop(-1.5), QColor(styles.VU_RED))
+        gradient.setColorAt(1.0, QColor(styles.VU_RED))
 
         offset = 3 if self._clip_leds else 0
         now = time.monotonic()
@@ -99,7 +102,14 @@ class VuMeter(QWidget):
             # Pic maintenu
             if self._peaks[i] > FADER_MIN_DB + 1:
                 peak_y = top + db_to_ratio(self._peaks[i]) * height
-                p.fillRect(QRectF(x, peak_y - 1, self._bar_w, 2), QColor(styles.TEXT_PRIMARY))
+                # Peak hold : trait coloré selon la zone du pic
+                if self._peaks[i] >= -3:
+                    peak_color = styles.VU_RED
+                elif self._peaks[i] >= -9:
+                    peak_color = styles.VU_YELLOW
+                else:
+                    peak_color = styles.TEXT_PRIMARY
+                p.fillRect(QRectF(x, peak_y - 1, self._bar_w, 2), QColor(peak_color))
             # Segmentation
             p.setPen(Qt.PenStyle.NoPen)
             shade = styles.color(styles.BG_SECTION, 0.55)
@@ -110,7 +120,7 @@ class VuMeter(QWidget):
             # LED de saturation au-dessus de chaque barre
             if self._clip_leds:
                 lit = self._clip_until[i] > now
-                p.setBrush(QColor(styles.RED_MUTE if lit else styles.RED_DIM))
+                p.setBrush(QColor(styles.VU_RED if lit else styles.RED_DIM))
                 cx = x + self._bar_w / 2
                 p.drawEllipse(QRectF(cx - 3.5, top - 13, 7, 7))
 

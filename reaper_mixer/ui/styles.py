@@ -59,9 +59,34 @@ ON_ACCENT = "#00341c"         # encre sur l'accent (badge FX allumé)
 ON_ACCENT_DARK = "#00140a"    # texte des boutons principaux
 BADGE_OFF = "#0d1a14"         # badge FX éteint
 
+# --- Palette « Dark Studio Pro » (thème par défaut, façon DAW) --------------
+# Neutres gris-bleu et accent bleu studio, appliqués tels quels (sans rotation).
+STUDIO_PALETTE = {
+    "BG_WINDOW": "#0f1115", "BG_GLOW": "#141821", "BG_COLUMN": "#161920",
+    "BG_SECTION": "#12151b", "BORDER_COLUMN": "#2a2f3d", "BORDER_SECTION": "#232836",
+    "BG_PANEL": "#161920", "BG_PILL": "#1c2029", "BG_DEEP": "#0b0d11",
+    "GREEN_NEON": "#3b82f6", "GREEN_TEXT": "#3b82f6", "GREEN_BRIGHT": "#60a5fa",
+    "GREEN_DIM": "#1e3a68", "GREEN_LABEL": "#94a3b8", "GREEN_SCALE": "#3a4152",
+    "TEXT_PRIMARY": "#f8fafc", "TEXT_SECONDARY": "#94a3b8", "TEXT_MUTED": "#5b6577",
+    "BUTTON_BG": "#1f2430", "BUTTON_HOVER": "#272d3b", "PILL_BG": "#1c2029",
+    "PILL_BORDER": "#2a2f3d", "KNOB_CAP_TOP": "#3a4150", "KNOB_CAP_BOTTOM": "#1b1f28",
+    "ON_ACCENT": "#0b1220", "ON_ACCENT_DARK": "#0b1220", "BADGE_OFF": "#1a1e27",
+}
+
+# Couleurs fixes des VU-mètres et des boutons d'état (indépendantes du thème)
+VU_GREEN = "#22c55e"
+VU_YELLOW = "#facc15"
+VU_RED = "#ef4444"
+MUTE_ON = "#b91c1c"          # rouge sombre
+MUTE_ON_HOVER = "#dc2626"
+SOLO_ON = "#f59e0b"          # ambre
+SOLO_ON_HOVER = "#fbbf24"
+TEXT_ON_SOLO = "#1c1203"
+
 # --- Thèmes ----------------------------------------------------------------
-DEFAULT_THEME = "neon"
+DEFAULT_THEME = "studio"
 THEMES = {                    # clé (config ui.theme) → (nom affiché, accent)
+    "studio": ("Dark Studio Pro", "#3b82f6"),
     "neon": ("Vert néon", "#00ff88"),
     "cyan": ("Cyan", "#00e5ff"),
     "bleu": ("Bleu", "#3d8bff"),
@@ -158,7 +183,9 @@ def set_theme(theme: str | None) -> str:
     if accent is None:
         theme, accent = DEFAULT_THEME, QColor(THEMES[DEFAULT_THEME][1])
     values = dict(_BASE)
-    if theme != DEFAULT_THEME:
+    if theme == "studio":
+        values.update(STUDIO_PALETTE)
+    elif theme != "neon":
         ah, as_, al, _ = accent.getHslF()
         bh, bs, _bl, _ = QColor(_BASE["GREEN_NEON"]).getHslF()
         shift = ah - bh if ah >= 0 else 0.0
@@ -331,12 +358,34 @@ QPushButton#muteButton:hover {{
     border-color: {GREEN_DIM};
 }}
 QPushButton#muteButton:checked {{
-    background: {RED_MUTE};
-    border: none;
-    color: {TEXT_ON_RED};
+    background: {MUTE_ON};
+    border: 1px solid {MUTE_ON_HOVER};
+    color: {WHITE};
 }}
 QPushButton#muteButton:checked:hover {{
-    background: #ff4545;
+    background: {MUTE_ON_HOVER};
+}}
+
+/* ---- bouton Solo ---- */
+QPushButton#soloButton {{
+    background: {BUTTON_BG};
+    border: 1px solid {BORDER_COLUMN};
+    border-radius: 7px;
+    color: {TEXT_PRIMARY};
+    font-size: 11px;
+    font-weight: 600;
+}}
+QPushButton#soloButton:hover {{
+    background: {BUTTON_HOVER};
+    border-color: {GREEN_DIM};
+}}
+QPushButton#soloButton:checked {{
+    background: {SOLO_ON};
+    border: 1px solid {SOLO_ON_HOVER};
+    color: {TEXT_ON_SOLO};
+}}
+QPushButton#soloButton:checked:hover {{
+    background: {SOLO_ON_HOVER};
 }}
 
 /* ---- zone d'effets ---- */
@@ -346,16 +395,33 @@ QScrollArea#fxScroll, QScrollArea#fxScroll > QWidget > QWidget {{
 }}
 QScrollBar:vertical {{
     background: transparent;
-    width: 4px;
+    width: 6px;
     margin: 2px 0;
+    border: none;
+}}
+QScrollBar:horizontal {{
+    background: transparent;
+    height: 6px;
+    margin: 0 2px;
+    border: none;
+}}
+QScrollBar::handle:vertical, QScrollBar::handle:horizontal {{
+    background: {BORDER_COLUMN};
+    border-radius: 3px;
 }}
 QScrollBar::handle:vertical {{
+    min-height: 24px;
+}}
+QScrollBar::handle:horizontal {{
+    min-width: 24px;
+}}
+QScrollBar::handle:hover, QScrollBar::handle:pressed {{
     background: {GREEN_DIM};
-    border-radius: 2px;
-    min-height: 20px;
 }}
 QScrollBar::add-line, QScrollBar::sub-line, QScrollBar::add-page, QScrollBar::sub-page {{
     background: none;
+    border: none;
+    width: 0;
     height: 0;
 }}
 
@@ -530,6 +596,35 @@ QSlider::handle:horizontal {{
     height: 14px;
     margin: -5px 0;
     border-radius: 7px;
+}}
+QSlider::groove:vertical {{
+    width: 4px;
+    background: {BUTTON_BG};
+    border: 1px solid {BORDER_COLUMN};
+    border-radius: 2px;
+}}
+QSlider::add-page:vertical {{
+    background: {GREEN_NEON};
+    border-radius: 2px;
+}}
+QSlider::sub-page:vertical {{
+    background: {BUTTON_BG};
+    border-radius: 2px;
+}}
+QSlider::handle:vertical {{
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #f8fafc, stop:0.48 #cbd5e1,
+                                stop:0.5 {GREEN_NEON}, stop:0.56 #cbd5e1, stop:1 #94a3b8);
+    border: 1px solid {BG_DEEP};
+    height: 26px;
+    width: 18px;
+    margin: 0 -8px;
+    border-radius: 4px;
+}}
+QSlider::handle:vertical:hover {{
+    border-color: {GREEN_NEON};
+}}
+QSlider::handle:horizontal:hover {{
+    background: {GREEN_BRIGHT};
 }}
 QRadioButton {{
     spacing: 8px;

@@ -403,7 +403,6 @@ def test_color_themes(qapp):
 
     from ui import styles
 
-    base_dim = styles.GREEN_DIM
     try:
         assert styles.set_theme("violet") == "violet"
         assert styles.GREEN_NEON == styles.THEMES["violet"][1]
@@ -419,7 +418,9 @@ def test_color_themes(qapp):
             assert styles.contrast(accent, ink) >= 4.5 and styles.contrast(hover, ink) >= 4.5, theme
         assert styles.set_theme("#123456") == "#123456"            # personnalisé, éclairci
         assert styles.set_theme("n'importe quoi") == styles.DEFAULT_THEME
-        assert styles.GREEN_DIM == base_dim and styles.GREEN_NEON == "#00ff88"
+        assert styles.GREEN_NEON == "#3b82f6" and styles.BG_WINDOW == "#0f1115"
+        assert styles.BG_COLUMN == "#161920" and styles.BORDER_COLUMN == "#2a2f3d"
+        assert styles.set_theme("neon") == "neon" and styles.GREEN_NEON == "#00ff88"
     finally:
         styles.set_theme(styles.DEFAULT_THEME)
 
