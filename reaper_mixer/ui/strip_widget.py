@@ -13,7 +13,7 @@ from __future__ import annotations
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (QAbstractButton, QFrame, QGridLayout, QHBoxLayout, QLabel,
-                               QLineEdit, QPushButton, QScrollArea, QStackedLayout, QVBoxLayout,
+                               QLineEdit, QMenu, QPushButton, QScrollArea, QStackedLayout, QVBoxLayout,
                                QWidget)
 
 from core.reaper_ctrl import TrackInfo
@@ -269,7 +269,7 @@ class EditableLabel(QWidget):
         self._label = QLabel(text)
         self._label.setObjectName("stripName")
         self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._label.setToolTip("Double-clic pour renommer")
+        self._label.setToolTip("Double-clic ou clic droit pour renommer")
         self._edit = QLineEdit(text)
         self._edit.setObjectName("stripNameEdit")
         self._edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -287,6 +287,14 @@ class EditableLabel(QWidget):
         self._label.setText(text)
 
     def mouseDoubleClickEvent(self, _event) -> None:  # noqa: N802
+        self.start_editing()
+
+    def contextMenuEvent(self, event) -> None:  # noqa: N802
+        menu = QMenu(self)
+        menu.addAction("Renommer le canal…", self.start_editing)
+        menu.exec(event.globalPos())
+
+    def start_editing(self) -> None:
         self._edit.setText(self._label.text())
         self._stack.setCurrentWidget(self._edit)
         self._edit.setFocus()

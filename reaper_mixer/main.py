@@ -638,7 +638,7 @@ def run_selftest(app: QApplication, cfg: dict, window: MainWindow, vm, reaper, p
               f"Python {platform.python_version()} — {platform.platform()}",
               f"Plateforme Qt : {app.platformName()}"]
     problems = []
-    if styles.FONT_FAMILY not in QFontDatabase.families():
+    if styles.DEFAULT_FONT not in QFontDatabase.families():
         problems.append("police Inter non chargée")
     image.parent.mkdir(parents=True, exist_ok=True)
     window.resize(*window.compact_size())   # fenêtre « comme Voicemeeter » par défaut
@@ -788,6 +788,7 @@ def main() -> int:
         return 1
     apply_log_level(cfg.get("log_level", "INFO"))
     ui_cfg = cfg.get("ui", {})
+    styles.configure(ui_cfg)
     styles.apply_theme(app, float(ui_cfg.get("panel_opacity", 1.0)), ui_cfg.get("theme"))
 
     if args.demo or args.selftest:

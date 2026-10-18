@@ -131,28 +131,54 @@ class Fader(QWidget):
                           Qt.PenCapStyle.RoundCap))
             p.drawLine(QPointF(rail_x, cy), QPointF(rail_x, bottom))
 
-        # Curseur : capuchon type console, ligne d'index à l'accent
-        thumb = QRectF(rail_x - THUMB_W / 2, cy - THUMB_H / 2, THUMB_W, THUMB_H)
+        # Curseur, selon le style choisi (styles.FADER_STYLE)
+        style = styles.FADER_STYLE
+        if style == "rond":
+            thumb, radius = QRectF(rail_x - 9, cy - 9, 18, 18), 9.0
+        elif style == "fin":
+            thumb, radius = QRectF(rail_x - THUMB_W / 2, cy - 4, THUMB_W, 8), 3.0
+        elif style == "vintage":
+            thumb, radius = QRectF(rail_x - THUMB_W / 2 + 1, cy - THUMB_H / 2, THUMB_W - 2, THUMB_H), 3.0
+        else:
+            thumb, radius = QRectF(rail_x - THUMB_W / 2, cy - THUMB_H / 2, THUMB_W, THUMB_H), 6.0
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(styles.color(styles.BG_BLACK, 0.45))
-        p.drawRoundedRect(thumb.translated(0, 1.5), 6, 6)
+        p.drawRoundedRect(thumb.translated(0, 1.5), radius, radius)
         gradient = QLinearGradient(thumb.topLeft(), thumb.bottomLeft())
         if self._muted:
             gradient.setColorAt(0, QColor("#9aa19d"))
             gradient.setColorAt(1, QColor("#6f7672"))
+        elif style == "vintage":
+            gradient.setColorAt(0, QColor("#d9d4c7"))
+            gradient.setColorAt(0.5, QColor("#a8a394"))
+            gradient.setColorAt(1, QColor("#7d7869"))
+        elif style == "fin":
+            gradient.setColorAt(0, QColor(styles.GREEN_BRIGHT))
+            gradient.setColorAt(1, QColor(styles.GREEN_NEON))
         else:
             gradient.setColorAt(0, QColor(styles.WHITE))
             gradient.setColorAt(1, QColor("#d3d8de"))
         p.setBrush(gradient)
         p.setPen(QPen(styles.color(styles.WHITE, 0.35), 1))
-        p.drawRoundedRect(thumb.adjusted(0.5, 0.5, -0.5, -0.5), 6, 6)
+        p.drawRoundedRect(thumb.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
         if self._dragging and not self._muted:   # halo pendant la saisie
             p.setPen(QPen(styles.color(styles.GREEN_NEON, 0.8), 1.5))
             p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawRoundedRect(thumb.adjusted(-1.5, -1.5, 1.5, 1.5), 7, 7)
+            p.drawRoundedRect(thumb.adjusted(-1.5, -1.5, 1.5, 1.5), radius + 1, radius + 1)
         index = styles.TEXT_MUTED if self._muted else styles.GREEN_NEON
-        p.setPen(QPen(QColor(index), 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-        p.drawLine(QPointF(rail_x - 6, cy), QPointF(rail_x + 6, cy))
+        if style == "vintage":                   # stries + index central
+            p.setPen(QPen(styles.color("#3b382f", 0.6), 1))
+            for dy in (-6, -3, 3, 6):
+                p.drawLine(QPointF(thumb.left() + 3, cy + dy), QPointF(thumb.right() - 3, cy + dy))
+            p.setPen(QPen(QColor(index), 2))
+            p.drawLine(QPointF(thumb.left() + 2, cy), QPointF(thumb.right() - 2, cy))
+        elif style == "rond":
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(index))
+            p.drawEllipse(QPointF(rail_x, cy), 3, 3)
+        elif style != "fin":
+            p.setPen(QPen(QColor(index), 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawLine(QPointF(rail_x - 6, cy), QPointF(rail_x + 6, cy))
 
     # ------------------------------------------------------------ interaction
     def mousePressEvent(self, event) -> None:  # noqa: N802

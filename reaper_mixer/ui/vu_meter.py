@@ -110,13 +110,15 @@ class VuMeter(QWidget):
                 else:
                     peak_color = styles.TEXT_PRIMARY
                 p.fillRect(QRectF(x, peak_y - 1, self._bar_w, 2), QColor(peak_color))
-            # Segmentation
+            # Segmentation, selon le style choisi (styles.VU_STYLE)
             p.setPen(Qt.PenStyle.NoPen)
-            shade = styles.color(styles.BG_SECTION, 0.55)
-            y = top + SEGMENT_PX
-            while y < bottom:
-                p.fillRect(QRectF(x, y, self._bar_w, 1), shade)
-                y += SEGMENT_PX
+            if styles.VU_STYLE != "continu":
+                step, gap = (6, 2) if styles.VU_STYLE == "led" else (SEGMENT_PX, 1)
+                shade = styles.color(styles.BG_SECTION, 0.85 if gap > 1 else 0.55)
+                y = top + step
+                while y < bottom:
+                    p.fillRect(QRectF(x, y, self._bar_w, gap), shade)
+                    y += step
             # LED de saturation au-dessus de chaque barre
             if self._clip_leds:
                 lit = self._clip_until[i] > now
