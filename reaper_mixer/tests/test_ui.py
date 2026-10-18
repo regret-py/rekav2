@@ -192,7 +192,7 @@ def test_custom_background_and_panel_opacity(qapp, mixer, tmp_path, appdata):
     dialog = SettingsDialog(window._cfg, None, reaper, vm, window, persist=False)
     dialog.appearanceChanged.connect(window.apply_appearance)
     assert [dialog.tabs.tabText(i) for i in range(dialog.tabs.count())] == [
-        "Général", "Audio", "Apparence", "À propos"]
+        "Général", "Canaux", "Audio", "Apparence", "À propos"]
     assert not dialog.remove_background.isEnabled()
     dialog.set_background(image)                # copiée dans %APPDATA%/REKA
     assert window._cfg["ui"]["background_image"] == "background.png"
@@ -622,3 +622,33 @@ def test_install_from_settings_opens_update_dialog(qapp, updating):
     window.open_settings()
     pump(qapp, 0.3)
     assert seen == ["UpdateDialog"]
+
+
+def test_font_widget_styles_and_rename_from_settings(qapp, mixer):
+    from ui import styles
+    from ui.settings_dialog import SettingsDialog
+
+    window, vm, reaper = mixer
+    dialog = SettingsDialog(window._cfg, None, reaper, vm, window, persist=False)
+    dialog.appearanceChanged.connect(window.apply_appearance)
+    dialog.stripRenamed.connect(window.rename_strip)
+    try:
+        dialog.fader_choice.setCurrentIndex(dialog.fader_choice.findData("vintage"))
+        dialog.vu_choice.setCurrentIndex(dialog.vu_choice.findData("continu"))
+        assert styles.FADER_STYLE == "vintage" and styles.VU_STYLE == "continu"
+        assert window._cfg["ui"]["fader_style"] == "vintage"
+        dialog.font_choice.setCurrentText("Segoe UI")
+        dialog.font_choice.currentFontChanged.emit(dialog.font_choice.currentFont())
+        assert styles.FONT_FAMILY == window._cfg["ui"]["font_family"]
+        assert styles.FONT_FAMILY in qapp.styleSheet()
+        window.grab()                               # rendu avec les nouveaux styles
+        dialog.name_edits[0].setText("Voix")
+        dialog.name_edits[0].editingFinished.emit()
+        assert window.strips[0].name.text() == "Voix"
+        assert window._cfg["ui"]["strip_names"][0] == "Voix"
+    finally:
+        for key in ("font_family", "fader_style", "vu_style"):
+            window._cfg["ui"].pop(key, None)
+        window.apply_appearance()
+        dialog.done(0)
+    assert styles.FONT_FAMILY == styles.DEFAULT_FONT and styles.FADER_STYLE == "console"

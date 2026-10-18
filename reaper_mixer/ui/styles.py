@@ -108,9 +108,40 @@ MIN_ACCENT_CONTRAST = 4.5     # contraste minimal accent / fond (lisibilité, WC
 HOVER_TOWARD_WHITE = 0.22     # survol des boutons principaux : accent éclairci
 _current_theme = DEFAULT_THEME
 
-FONT_FAMILY = "Inter"
+DEFAULT_FONT = "Inter"
+FONT_FAMILY = DEFAULT_FONT    # police choisie (config ui.font_family), Inter par défaut
 FONT_FALLBACK = "Segoe UI"
 FONT_FILES = ("Inter-Regular.ttf", "Inter-Medium.ttf", "Inter-SemiBold.ttf")
+
+# --- Styles des widgets dessinés à la main ------------------------------------
+FADER_STYLES = {              # clé (config ui.fader_style) → nom affiché
+    "console": "Console (capuchon carré)",
+    "rond": "Rond",
+    "fin": "Fin (barre)",
+    "vintage": "Vintage (strié)",
+}
+VU_STYLES = {                 # clé (config ui.vu_style) → nom affiché
+    "segments": "LED fines",
+    "led": "LED larges",
+    "continu": "Continu",
+}
+DEFAULT_FADER_STYLE = "console"
+DEFAULT_VU_STYLE = "segments"
+FADER_STYLE = DEFAULT_FADER_STYLE
+VU_STYLE = DEFAULT_VU_STYLE
+
+
+def configure(ui_cfg: dict) -> bool:
+    """Police et styles de widgets d'après la config `ui` ; True si quelque chose a changé."""
+    global FONT_FAMILY, FADER_STYLE, VU_STYLE
+    family = str(ui_cfg.get("font_family") or DEFAULT_FONT).strip() or DEFAULT_FONT
+    fader = ui_cfg.get("fader_style")
+    fader = fader if fader in FADER_STYLES else DEFAULT_FADER_STYLE
+    vu = ui_cfg.get("vu_style")
+    vu = vu if vu in VU_STYLES else DEFAULT_VU_STYLE
+    changed = (family, fader, vu) != (FONT_FAMILY, FADER_STYLE, VU_STYLE)
+    FONT_FAMILY, FADER_STYLE, VU_STYLE = family, fader, vu
+    return changed
 
 
 def font(pixel_size: int, weight: QFont.Weight = QFont.Weight.Normal) -> QFont:
@@ -229,6 +260,8 @@ def build_stylesheet(panel_opacity: float = 1.0) -> str:
 def refresh(app: QApplication, panel_opacity: float = 1.0) -> None:
     """Ré-applique palette et QSS (après un changement de thème ou d'opacité)."""
     _apply_palette(app)
+    if app.font().family() != FONT_FAMILY:
+        app.setFont(font(11))
     stylesheet = build_stylesheet(panel_opacity)
     if app.styleSheet() != stylesheet:   # re-styler toute l'app coûte : seulement si besoin
         app.setStyleSheet(stylesheet)

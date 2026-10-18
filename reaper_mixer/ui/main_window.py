@@ -446,6 +446,14 @@ class MainWindow(QMainWindow):
         elif installed:
             self.restart_app()
 
+    def rename_strip(self, index: int, name: str) -> None:
+        """Renomme un canal (depuis les réglages) : strip, REAPER, Voicemeeter, config."""
+        name = name.strip()[:30]
+        if not name or not 0 <= index < len(self.strips) or self.strips[index].name.text() == name:
+            return
+        self.strips[index].name.setText(name)
+        self._on_renamed(index, name)
+
     def _on_renamed(self, index: int, name: str) -> None:
         names = self._cfg.setdefault("ui", {}).setdefault("strip_names", [])
         while len(names) <= index:
@@ -488,6 +496,7 @@ class MainWindow(QMainWindow):
         dialog.projectRequested.connect(self.choose_project)
         dialog.appearanceChanged.connect(self.apply_appearance)
         dialog.windowResetRequested.connect(self.reset_window_size)
+        dialog.stripRenamed.connect(self.rename_strip)
         # Redémarrage après la fermeture des réglages (pas depuis leur boucle modale)
         restart = []
         dialog.restartRequested.connect(lambda: restart.append(True))
@@ -511,6 +520,8 @@ class MainWindow(QMainWindow):
         theme_changed = theme != styles.current_theme()
         if theme_changed:
             styles.set_theme(theme)
+        if styles.configure(ui_cfg):          # police, style des faders / VU
+            theme_changed = True
         self.background.set_image(background_image_path(self._cfg),
                                   float(ui_cfg.get("background_darkness", DEFAULT_DARKNESS)))
         app = QApplication.instance()

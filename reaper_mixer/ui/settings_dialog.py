@@ -20,7 +20,8 @@ from pathlib import Path
 from PySide6.QtCore import QPointF, Qt, QUrl, Signal
 from PySide6.QtGui import QColor, QConicalGradient, QDesktopServices, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (QAbstractButton, QButtonGroup, QCheckBox, QColorDialog, QDialog,
-                               QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
+                               QComboBox, QFileDialog, QFontComboBox, QFormLayout, QGroupBox,
+                               QHBoxLayout, QLabel,
                                QLineEdit, QPushButton, QRadioButton, QSlider, QTabWidget,
                                QVBoxLayout, QWidget)
 
@@ -105,6 +106,7 @@ class SettingsDialog(QDialog):
     windowResetRequested = Signal()  # « Taille compacte »
     restartRequested = Signal()      # changement d'édition de Voicemeeter
     updateRequested = Signal()       # « Installer la mise à jour »
+    stripRenamed = Signal(int, str)  # nom d'un canal modifié
 
     def __init__(self, cfg: dict, processes, reaper, vm, parent: QWidget | None = None,
                  persist: bool = True, updater=None) -> None:
@@ -137,8 +139,9 @@ class SettingsDialog(QDialog):
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self._tab(self._project_group(), self._engines_group()), "Général")
+        self.tabs.addTab(self._tab(self._names_group()), "Canaux")
         self.tabs.addTab(self._tab(self._reaper_group(), self._options_group()), "Audio")
-        self.tabs.addTab(self._tab(self._theme_group(), self._background_group(),
+        self.tabs.addTab(self._tab(self._theme_group(), self._widgets_group(), self._background_group(),
                                    self._window_group()), "Apparence")
         self.tabs.addTab(self._about_tab(), "À propos")
         layout.addWidget(self.tabs, 1)
@@ -299,6 +302,52 @@ class SettingsDialog(QDialog):
         box.addWidget(self.theme_label)
         self.theme_group.buttonClicked.connect(lambda button: self.set_theme(button.theme))
         self._show_theme()
+        return group
+
+    def _widgets_group(self) -> QGroupBox:
+        group = QGroupBox("Police et widgets")
+        form = QFormLayout(group)
+        ui_cfg = self._cfg.setdefault("ui", {})
+        self.font_choice = QFontComboBox()
+        self.font_choice.setCurrentFont(styles.font(11))
+        self.font_choice.setCurrentText(styles.FONT_FAMILY)
+        self.font_choice.currentFontChanged.connect(
+            lambda f: self._set_ui("font_family", f.family()))
+        reset_font = QPushButton("Inter")
+        reset_font.setToolTip("Police d'origine")
+        reset_font.clicked.connect(lambda: self.font_choice.setCurrentText(styles.DEFAULT_FONT))
+        row = QHBoxLayout()
+        row.addWidget(self.font_choice, 1)
+        row.addWidget(reset_font)
+        form.addRow("Police", row)
+        self.fader_choice = self._style_combo(styles.FADER_STYLES, styles.FADER_STYLE, "fader_style")
+        form.addRow("Faders", self.fader_choice)
+        self.vu_choice = self._style_combo(styles.VU_STYLES, styles.VU_STYLE, "vu_style")
+        form.addRow("VU-mètres", self.vu_choice)
+        return group
+
+    def _style_combo(self, choices: dict, current: str, key: str) -> QComboBox:
+        combo = QComboBox()
+        for value, label in choices.items():
+            combo.addItem(label, value)
+        combo.setCurrentIndex(max(0, combo.findData(current)))
+        combo.currentIndexChanged.connect(lambda _i: self._set_ui(key, combo.currentData()))
+        return combo
+
+    def _names_group(self) -> QGroupBox:
+        group = QGroupBox("Noms des canaux")
+        form = QFormLayout(group)
+        names = list(self._cfg.get("ui", {}).get("strip_names", []))
+        count = int(getattr(self._vm, "strip_count", 0) or len(names))
+        self.name_edits: list[QLineEdit] = []
+        for index in range(count):
+            edit = QLineEdit(names[index] if index < len(names) else f"Strip {index + 1}")
+            edit.setMaxLength(30)
+            edit.editingFinished.connect(
+                lambda index=index, edit=edit: self.stripRenamed.emit(index, edit.text().strip()))
+            self.name_edits.append(edit)
+            form.addRow(f"Canal {index + 1}", edit)
+        form.addRow(_hint("Astuce : double-clic ou clic droit sur le nom d'un canal pour le renommer."))
         return group
 
     def _background_group(self) -> QGroupBox:
