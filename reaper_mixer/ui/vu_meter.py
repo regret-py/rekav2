@@ -77,10 +77,9 @@ class VuMeter(QWidget):
         height = max(1.0, bottom - top)
 
         gradient = QLinearGradient(0, bottom, 0, top)
-        # Vert (niveaux normaux) → jaune (zone haute) → rouge (crêtes),
-        # couleurs fixes quel que soit le thème
-        gradient.setColorAt(0.0, QColor(styles.VU_GREEN).darker(115))
-        gradient.setColorAt(_gradient_stop(-18), QColor(styles.VU_GREEN))
+        # Couleur du thème (niveaux normaux) → jaune (zone haute) → rouge (crêtes)
+        gradient.setColorAt(0.0, QColor(styles.GREEN_NEON).darker(115))
+        gradient.setColorAt(_gradient_stop(-18), QColor(styles.GREEN_NEON))
         gradient.setColorAt(_gradient_stop(-9), QColor(styles.VU_YELLOW))
         gradient.setColorAt(_gradient_stop(-3), QColor(styles.VU_YELLOW))
         gradient.setColorAt(_gradient_stop(-1.5), QColor(styles.VU_RED))

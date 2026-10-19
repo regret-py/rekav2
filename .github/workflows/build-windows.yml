@@ -79,7 +79,7 @@ jobs:
         run: |
           $info = (Get-Item dist/REKA.exe).VersionInfo
           $info | Format-List ProductName, ProductVersion, FileDescription, CompanyName, LegalCopyright
-          if ($info.CompanyName -ne "Regrettable & Zerka") { throw "Crédits absents de REKA.exe" }
+          if ($info.CompanyName -ne "Regrettable") { throw "Crédits absents de REKA.exe" }
       - name: Auto-test de l'exe (rendu de la console en mode démo)
         env:
           APPDATA: ${{ runner.temp }}/appdata
@@ -131,7 +131,7 @@ jobs:
             --notes "Exécutable Windows construit automatiquement depuis $GITHUB_SHA.
 
           Télécharge **REKA.exe** et lance-le. Il faut Voicemeeter (Potato ou Banana) et REAPER installés.
-          REKA est développé par Regrettable et Zerka.
+          REKA est développé par Regrettable. Merci à Zerka et Fyra pour leur contribution.
           Pour voir la console sans eux : \`REKA.exe --demo\`.
           console.png : rendu de l'auto-test fait par ce build."
       - name: Release commune « build-latest » (mises à jour de tous les exe)
