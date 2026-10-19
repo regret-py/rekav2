@@ -136,6 +136,11 @@ class FakeProcesses:
     def is_running(self, key):
         return self.running
 
+    def is_ready(self, key):
+        return self.running and self.window
+
+    window = True
+
     def bring_to_front(self, key):
         self.fronted.append(key)
         return self.running
@@ -164,6 +169,10 @@ def test_flstudio_inserts_per_strip(qapp, cfg):
     processes.running = False
     host._check()
     assert not host.is_connected and connection == [True, False]
+    # Processus vivant mais sans fenêtre (bloqué sur une erreur) : pas d'insert
+    processes.running, processes.window = True, False
+    host._check()
+    assert not host.is_connected and host.insert_strips(host.strip_tracks, host.is_connected) == set()
     host.close()
 
 
@@ -263,3 +272,51 @@ def test_setup_dialog_saves_choices(qapp, cfg):
     dialog.accept()
     assert cfg["voicemeeter"]["kind"] == "banana" and cfg["effects"]["host"] == "apo"
     assert cfg["setup_done"] is True
+
+
+def test_effects_host_failure_does_not_block_reka(qapp, cfg, appdata, tmp_path):
+    """FL Studio qui plante à chaque lancement : REKA propose de démarrer sans
+    effets (ou de changer de moteur) au lieu de rester bloqué."""
+    import main
+    from core.process_manager import ProcessStartError
+
+    class CrashingProcesses:
+        stopped = []
+
+        def start_voicemeeter(self):
+            pass
+
+        def start_flstudio(self):
+            raise ProcessStartError("FL Studio s'est fermé juste après son lancement.")
+
+        def stop(self, key):
+            self.stopped.append(key)
+
+        def abort_startup(self):
+            pass
+
+    cfg["effects"]["host"] = "flstudio"
+    processes = CrashingProcesses()
+    host = main.create_host(cfg, processes)
+    worker = main.StartupWorker(cfg, processes, vm=None, host=host)
+    with pytest.raises(main.EffectsStartError) as raised:
+        worker._boot()
+    assert raised.value.label == "FL Studio" and "fermé" in str(raised.value.cause)
+
+    # « Continuer sans effets » : moteur abandonné fermé au prochain essai, console sans effets
+    app = main.MixerApp(qapp, cfg, tmp_path / "app.log")
+    app._host = host
+    app._use_no_effects("FL Studio n'a pas démarré")
+    assert app._host.kind == "none" and app._stop_engine == "flstudio"
+    assert "sans effets" in app._degraded and cfg["effects"]["host"] == "flstudio"
+
+    class FakeVm:
+        logged = False
+
+        def login(self):
+            self.logged = True
+
+    vm = FakeVm()
+    worker = main.StartupWorker(cfg, processes, vm, app._host, stop_engine=app._stop_engine)
+    worker._boot()
+    assert processes.stopped == ["flstudio"] and vm.logged

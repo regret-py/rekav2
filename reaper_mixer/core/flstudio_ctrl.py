@@ -121,7 +121,11 @@ class FlStudioController(EffectsHost):
             self.command_failed.emit("FL Studio ne tourne pas : relance REKA pour le démarrer.")
 
     def _check(self) -> None:
-        alive = bool(self._processes is not None and self._processes.is_running("flstudio"))
+        # Fenêtre principale exigée : un FL Studio bloqué sur une erreur au lancement
+        # ne traite pas le son, l'insert rendrait les strips muettes
+        processes = self._processes
+        ready = getattr(processes, "is_ready", None) or getattr(processes, "is_running", None)
+        alive = bool(ready is not None and ready("flstudio"))
         if alive != self._connected:
             self._connected = alive
             log.info("FL Studio %s.", "lancé" if alive else "fermé")

@@ -51,7 +51,7 @@ from core.app_volume import create_backend
 from core.process_manager import (AppNotInstalledError, OtherEditionRunningError, ProcessManager,
                                   ProcessManagerError, StartupAborted,
                                   installed_voicemeeter_kinds, reaper_project)
-from core.effects import HOST_REAPER, EffectsHost, create_host
+from core.effects import HOST_REAPER, EffectsHost, NoEffects, create_host
 from core.updater import UpdateChecker, cleanup_previous, load_build_info
 from core.voicemeeter_ctrl import EDITIONS, VoicemeeterController, edition
 from ui import styles
@@ -224,6 +224,18 @@ class StartupTimeout(Exception):
         self.hint = hint
 
 
+class EffectsStartError(Exception):
+    """Le moteur d'effets (REAPER, FL Studio) n'a pas démarré : REKA peut
+    quand même ouvrir la console, sans effets. Un moteur qui plante à chaque
+    lancement ne doit jamais empêcher d'utiliser REKA."""
+
+    def __init__(self, label: str, cause: Exception) -> None:
+        super().__init__(f"{label} n'a pas pu démarrer : {cause}")
+        self.label = label
+        self.cause = cause
+        self.hint = getattr(cause, "hint", "")
+
+
 class StartupWorker(QThread):
     """Lance Voicemeeter et le moteur d'effets puis attend qu'ils répondent.
 
@@ -237,13 +249,14 @@ class StartupWorker(QThread):
 
     def __init__(self, cfg: dict, processes: ProcessManager,
                  vm: VoicemeeterController, host: EffectsHost,
-                 project: str | None = None) -> None:
+                 project: str | None = None, stop_engine: str | None = None) -> None:
         super().__init__()
         self._cfg = cfg
         self._processes = processes
         self._vm = vm
         self._host = host
         self._project = project       # None = projet par défaut de la config
+        self._stop_engine = stop_engine   # moteur abandonné (« Continuer sans effets ») à fermer
         self._cancel = threading.Event()
 
     def cancel(self) -> None:
@@ -256,7 +269,7 @@ class StartupWorker(QThread):
             self._boot()
         except StartupAborted:
             log.info("Démarrage interrompu.")
-        except (ProcessManagerError, StartupTimeout) as exc:
+        except (ProcessManagerError, StartupTimeout, EffectsStartError) as exc:
             log.error("Échec du démarrage : %s", exc)  # cas prévus, message explicite
             self.failed.emit(exc)
         except Exception as exc:  # imprévu : trace complète dans le journal
@@ -271,16 +284,29 @@ class StartupWorker(QThread):
         reaper_cfg = self._cfg.setdefault("reaper", {})
         host = self._host
 
+        if self._stop_engine:
+            try:
+                self._processes.stop(self._stop_engine)
+            except Exception as exc:
+                log.warning("Moteur abandonné non arrêté : %s", exc)
+
         self.progress.emit("Lancement de Voicemeeter…")
         self._processes.start_voicemeeter()
 
         reused = False
-        if host.process_key == "reaper":
-            self.progress.emit("Lancement de REAPER…")
-            reused = self._processes.start_reaper(prepare=host.prepare_launch, project=self._project)
-        elif host.process_key == "flstudio":
-            self.progress.emit("Lancement de FL Studio…")
-            self._processes.start_flstudio()
+        try:
+            if host.process_key == "reaper":
+                self.progress.emit("Lancement de REAPER…")
+                reused = self._processes.start_reaper(prepare=host.prepare_launch,
+                                                      project=self._project)
+            elif host.process_key == "flstudio":
+                self.progress.emit("Lancement de FL Studio…")
+                self._processes.start_flstudio()
+        except (StartupAborted, AppNotInstalledError, OtherEditionRunningError):
+            raise
+        except (ProcessManagerError, OSError) as exc:
+            # Plantage au lancement, installation cassée… : REKA peut continuer sans effets
+            raise EffectsStartError(host.label, exc) from exc
 
         self.progress.emit("Connexion à Voicemeeter…")
         self._retry("l'API Remote de Voicemeeter", self._vm.login,
@@ -291,13 +317,16 @@ class StartupWorker(QThread):
             return             # les autres moteurs démarrent avec la fenêtre (thread UI)
         self.progress.emit("Connexion à REAPER…")
         host.start()
-        self._retry("REAPER", self._ping_reaper,
-                    timeout_s=float(reaper_cfg.get("bridge_timeout_s", 60)),
-                    interval_s=BRIDGE_RETRY_S,
-                    hint=("Au premier lancement, REAPER peut mettre une minute à analyser "
-                          "tes plugins : patiente puis clique sur « Réessayer ». "
-                          "Vérifie aussi qu'aucune fenêtre de REAPER (licence, message…) "
-                          "n'attend une réponse."))
+        try:
+            self._retry("REAPER", self._ping_reaper,
+                        timeout_s=float(reaper_cfg.get("bridge_timeout_s", 60)),
+                        interval_s=BRIDGE_RETRY_S,
+                        hint=("Au premier lancement, REAPER peut mettre une minute à analyser "
+                              "tes plugins : patiente puis clique sur « Réessayer ». "
+                              "Vérifie aussi qu'aucune fenêtre de REAPER (licence, message…) "
+                              "n'attend une réponse."))
+        except StartupTimeout as exc:
+            raise EffectsStartError(host.label, exc) from exc
         if reused:
             self._open_wanted_project()
 
@@ -359,6 +388,8 @@ class MixerApp:
         self._worker: StartupWorker | None = None
         self._window: MainWindow | None = None
         self._project: str | None = None   # None = projet par défaut
+        self._stop_engine: str | None = None   # moteur abandonné, à fermer au prochain essai
+        self._degraded = ""                # message affiché à l'ouverture (session sans effets)
         self._stopped = False
 
     def start(self) -> None:
@@ -382,7 +413,8 @@ class MixerApp:
     def _boot(self) -> None:
         self._splash.set_status("Démarrage…")
         self._worker = StartupWorker(self._cfg, self._processes, self._vm, self._host,
-                                     project=self._project)
+                                     project=self._project, stop_engine=self._stop_engine)
+        self._stop_engine = None
         self._worker.progress.connect(self._splash.set_status)
         self._worker.succeeded.connect(self._on_ready)
         self._worker.failed.connect(self._on_failed)
@@ -407,6 +439,8 @@ class MixerApp:
             return
         self._window.show()
         self._splash.finish(self._window)
+        if self._degraded:
+            self._window.toast.show_message(self._degraded)
         # À partir d'ici, fermer la fenêtre principale quitte l'application
         self._qt.setQuitOnLastWindowClosed(True)
 
@@ -414,6 +448,8 @@ class MixerApp:
         self._splash.hide()
         if isinstance(exc, AppNotInstalledError):
             retry = self._ask_missing_app(exc)
+        elif isinstance(exc, EffectsStartError):
+            retry = self._ask_effects_failed(exc)
         elif isinstance(exc, OtherEditionRunningError):
             retry = self._ask_other_edition(exc)
         else:
@@ -438,9 +474,10 @@ class MixerApp:
         box.setInformativeText(
             f"S'il est déjà installé ailleurs, clique sur « Localiser… » "
             f"et sélectionne {exc.exe_name}.")
-        # REAPER / FL Studio absent : un autre moteur d'effets peut convenir
-        engines = None
+        # REAPER / FL Studio absent : un autre moteur d'effets peut convenir, ou aucun
+        engines = without = None
         if exc.config_key in ("reaper", "flstudio"):
+            without = box.addButton("Continuer sans effets", QMessageBox.ButtonRole.ActionRole)
             engines = box.addButton("Changer de moteur d'effets…", QMessageBox.ButtonRole.ActionRole)
         # Voicemeeter : une autre édition est peut-être installée (Banana seule…)
         other = None
@@ -466,6 +503,9 @@ class MixerApp:
             if switch is not None and clicked is switch:
                 self._switch_edition(other)
                 return False
+            if without is not None and clicked is without:
+                self._use_no_effects(f"{exc.app_name} est introuvable")
+                return True
             if engines is not None and clicked is engines:
                 if self.choose_engines():
                     self._relaunch("Moteur d'effets enregistré : relance REKA pour l'utiliser.")
@@ -485,6 +525,49 @@ class MixerApp:
                 log.info("%s localisé manuellement : %s", exc.app_name, path)
                 return True
             return clicked is retry
+
+    def _ask_effects_failed(self, exc: EffectsStartError) -> bool:
+        """Le moteur d'effets ne démarre pas (plante au lancement, ne répond
+        pas) : REKA démarre sans effets, change de moteur, ou réessaie."""
+        box = QMessageBox()
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(config.APP_NAME)
+        box.setText(f"{exc.label} n'a pas pu démarrer.")
+        details = [str(exc.cause) or type(exc.cause).__name__]
+        if exc.hint:
+            details.append(exc.hint)
+        details.append("REKA peut ouvrir la console sans effets (Voicemeeter seul) pour cette "
+                       "session, ou utiliser un autre moteur d'effets.")
+        details.append(f"Détails dans le journal :\n{self._log_path}")
+        box.setInformativeText("\n\n".join(details))
+        without = box.addButton("Continuer sans effets", QMessageBox.ButtonRole.AcceptRole)
+        engines = box.addButton("Changer de moteur d'effets…", QMessageBox.ButtonRole.ActionRole)
+        retry = box.addButton("Réessayer", QMessageBox.ButtonRole.ActionRole)
+        box.addButton("Quitter", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(without)
+        while True:
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is without:
+                self._use_no_effects(f"{exc.label} n'a pas démarré")
+                return True
+            if clicked is engines:
+                if self.choose_engines():
+                    self._relaunch("Moteur d'effets enregistré : relance REKA pour l'utiliser.")
+                    return False
+                continue
+            return clicked is retry
+
+    def _use_no_effects(self, reason: str) -> None:
+        """Cette session tourne sans moteur d'effets (la config n'est pas changée :
+        au prochain lancement, le moteur choisi est de nouveau essayé)."""
+        old = self._host
+        log.warning("%s : démarrage sans effets pour cette session.", reason)
+        _safely(old.close, save_project=False)
+        self._stop_engine = old.process_key
+        self._host = NoEffects(self._cfg)
+        self._degraded = (f"{reason} : REKA tourne sans effets pour cette session. "
+                          "Réglages → Général → Effets pour changer de moteur.")
 
     def _ask_other_edition(self, exc: OtherEditionRunningError) -> bool:
         """Une autre édition de Voicemeeter est ouverte : l'utiliser, ou la fermer

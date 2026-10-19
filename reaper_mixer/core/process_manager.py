@@ -571,6 +571,14 @@ class ProcessManager:
         managed = self._get(key)
         return managed is not None and managed.is_alive()
 
+    def is_ready(self, key: str) -> bool:
+        """Le moteur tourne ET sa fenêtre principale existe : un processus figé
+        sur un message d'erreur (installation cassée, DLL manquante) ne compte pas."""
+        managed = self._get(key)
+        if managed is None or not managed.is_alive():
+            return False
+        return bool(managed.main_windows()) if IS_WINDOWS else True
+
     def will_terminate(self, key: str) -> bool:
         """True si shutdown() arrêtera ce processus : les contrôleurs peuvent
         alors demander un arrêt propre au moteur avant (sauvegarde, etc.).

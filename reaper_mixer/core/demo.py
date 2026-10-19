@@ -287,6 +287,9 @@ class DemoProcesses:
     def is_running(self, key: str) -> bool:
         return True
 
+    def is_ready(self, key: str) -> bool:
+        return True
+
     def executable(self, key: str) -> None:
         return None
 

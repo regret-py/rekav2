@@ -52,7 +52,7 @@
     "path": "",
     "project": "",
     "inserts": [],
-    "window_timeout_s": 60,
+    "window_timeout_s": 15,
     "close_timeout_s": 60,
     "terminate_on_exit": false
   },

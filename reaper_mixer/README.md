@@ -110,6 +110,12 @@ indique s'il est installé sur le PC et le délai qu'il ajoute à la voix. On le
   `Include: reka.txt` à `config.txt` : le reste de ta configuration n'est pas touché. Les
   réglages des plugins faits dans l'éditeur d'Equalizer APO sont conservés.
 
+Si le moteur d'effets ne démarre pas (FL Studio ou REAPER qui plante au lancement,
+installation cassée, pont REAPER qui ne répond pas), REKA ne reste pas bloqué : il propose
+**Continuer sans effets** (la console s'ouvre, Voicemeeter seul, pour cette session),
+**Changer de moteur d'effets…**, ou **Réessayer**. Au prochain lancement, le moteur choisi
+est de nouveau essayé ; `REKA.exe --setup` rouvre aussi le menu de sélection.
+
 ## Délai de la voix
 
 - Chaque strip affiche à côté de *Effets* le délai ajouté par ses plugins actifs
