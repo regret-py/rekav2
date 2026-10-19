@@ -356,6 +356,16 @@ class ReaperController(EffectsHost):
         for stale in ("commands.txt", "state.txt", "fxlist.txt", "bridge_error.txt"):
             (self._ipc_dir / stale).unlink(missing_ok=True)
         install_startup_hook(self.resource_path(exe))
+        # Nouvel essai (« Réessayer ») : le thread de lecture du premier essai
+        # tourne encore ; il doit réécrire commands.txt (qui vient d'être effacé)
+        # et attendre le battement de cœur du nouveau REAPER.
+        with self._lock:
+            self._commands_dirty = True
+        self._last_beat = 0.0
+        self._last_n = None
+        self._error_file_logged = False
+        if not self._connected:
+            self._ready.clear()
         return {IPC_ENV: str(self._ipc_dir)}
 
     # ----------------------------------------------------------- connexion

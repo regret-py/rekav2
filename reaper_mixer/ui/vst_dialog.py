@@ -166,6 +166,15 @@ class VstDialog(QDialog):
     def _update_buttons(self) -> None:
         self.add_button.setEnabled(self.list.currentItem() is not None)
 
+    def done(self, result: int) -> None:
+        # Fermé avant la réponse de REAPER : plus rien ne doit arriver ici
+        if self._reaper is not None and not self._plugins:
+            try:
+                self._reaper.installed_fx_ready.disconnect(self._on_reaper_list)
+            except (RuntimeError, TypeError):
+                pass
+        super().done(result)
+
     def _browse(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Choisir un plugin", "", self._browse_filter or "")
         if path:

@@ -50,7 +50,7 @@ from core import config
 from core.app_volume import create_backend
 from core.process_manager import (AppNotInstalledError, OtherEditionRunningError, ProcessManager,
                                   ProcessManagerError, StartupAborted,
-                                  installed_voicemeeter_kinds)
+                                  installed_voicemeeter_kinds, reaper_project)
 from core.effects import HOST_REAPER, EffectsHost, create_host
 from core.updater import UpdateChecker, cleanup_previous, load_build_info
 from core.voicemeeter_ctrl import EDITIONS, VoicemeeterController, edition
@@ -274,9 +274,10 @@ class StartupWorker(QThread):
         self.progress.emit("Lancement de Voicemeeter…")
         self._processes.start_voicemeeter()
 
+        reused = False
         if host.process_key == "reaper":
             self.progress.emit("Lancement de REAPER…")
-            self._processes.start_reaper(prepare=host.prepare_launch, project=self._project)
+            reused = self._processes.start_reaper(prepare=host.prepare_launch, project=self._project)
         elif host.process_key == "flstudio":
             self.progress.emit("Lancement de FL Studio…")
             self._processes.start_flstudio()
@@ -297,6 +298,24 @@ class StartupWorker(QThread):
                           "tes plugins : patiente puis clique sur « Réessayer ». "
                           "Vérifie aussi qu'aucune fenêtre de REAPER (licence, message…) "
                           "n'attend une réponse."))
+        if reused:
+            self._open_wanted_project()
+
+    def _open_wanted_project(self) -> None:
+        """REAPER restait ouvert (session précédente) : il n'a pas reçu le projet
+        voulu en argument, on l'ouvre maintenant s'il en a un autre."""
+        wanted = reaper_project(self._cfg, self._project)
+        current = self._host.project_path
+        if wanted is None:
+            return
+
+        def same(a: str | Path, b: str | Path) -> bool:
+            return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+        if not current or not same(current, wanted):
+            log.info("REAPER repris sur « %s » : ouverture du projet voulu (%s).",
+                     current or "sans projet", wanted)
+            self._host.open_project(wanted)
 
     def _ping_reaper(self) -> None:
         if not self._host.ping(timeout_s=BRIDGE_PING_TIMEOUT_S):
@@ -357,7 +376,7 @@ class MixerApp:
         dialog = ProjectDialog(self._cfg, startup=True)
         if dialog.exec():
             self._project = dialog.selected
-            config.save_config(self._cfg)
+            save_config_quietly(self._cfg)
 
     # --------------------------------------------------------------- démarrage
     def _boot(self) -> None:
@@ -371,7 +390,7 @@ class MixerApp:
 
     def _on_ready(self) -> None:
         try:
-            config.save_config(self._cfg)  # chemins auto-détectés mémorisés
+            save_config_quietly(self._cfg)  # chemins auto-détectés mémorisés
             self._window = MainWindow(cfg=self._cfg, vm=self._vm,
                                       reaper=self._host, processes=self._processes,
                                       apps=create_backend(self._cfg), updater=self._updater)
@@ -462,7 +481,7 @@ class MixerApp:
                 if not path:
                     continue
                 self._cfg.setdefault(exc.config_key, {})["path"] = path
-                config.save_config(self._cfg)
+                save_config_quietly(self._cfg)
                 log.info("%s localisé manuellement : %s", exc.app_name, path)
                 return True
             return clicked is retry
@@ -493,7 +512,7 @@ class MixerApp:
         redémarrage (les contrôleurs et le projet vierge en dépendent)."""
         log.info("Passage sur l'édition %s de Voicemeeter.", kind)
         self._cfg.setdefault("voicemeeter", {})["kind"] = kind
-        config.save_config(self._cfg)
+        save_config_quietly(self._cfg)
         self._relaunch("Édition enregistrée : relance REKA pour l'utiliser.")
 
     def _relaunch(self, fallback_message: str) -> None:
@@ -508,7 +527,7 @@ class MixerApp:
         dialog = SetupDialog(self._cfg, first_run=first_run)
         if not dialog.exec():
             return False
-        config.save_config(self._cfg)
+        save_config_quietly(self._cfg)
         return True
 
     def show_window(self) -> bool:
@@ -567,6 +586,17 @@ class MixerApp:
         # La fenêtre a écrit son état dans la config (closeEvent)
         _safely(config.save_config, self._cfg)
         _safely(self._processes.shutdown)
+
+
+def save_config_quietly(cfg: dict) -> bool:
+    """Sauvegarde la config sans jamais interrompre l'application : un fichier
+    verrouillé un instant (antivirus, sauvegarde) ne doit pas fermer REKA."""
+    try:
+        config.save_config(cfg)
+        return True
+    except OSError as exc:
+        log.error("Config non sauvegardée : %s", exc)
+        return False
 
 
 def _safely(func: Callable, *args, **kwargs) -> None:
@@ -880,7 +910,7 @@ def main() -> int:
         if not dialog.exec():
             lock.unlock()
             return 0
-        config.save_config(cfg)
+        save_config_quietly(cfg)
 
     mixer = MixerApp(app, cfg, log_path)
     server = listen_for_show_requests(mixer.show_window)

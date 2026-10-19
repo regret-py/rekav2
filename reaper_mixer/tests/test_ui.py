@@ -660,3 +660,18 @@ def test_gains_follow_voicemeeter_range_above_0db(qapp, mixer):
     QApplication.sendEvent(strip.fader, event)
     pump(qapp, 0.05)
     assert vm._strips[0].gain == 6.5
+
+
+def test_dialogs_do_not_pile_up(qapp, mixer):
+    """Chaque ouverture du dialogue d'ajout d'effet (ou de projet) est libérée."""
+    from ui.project_dialog import ProjectDialog
+    from ui.vst_dialog import VstDialog
+
+    window, _vm, _reaper = mixer
+    for _ in range(3):
+        QTimer.singleShot(50, lambda: QApplication.activeModalWidget().reject())
+        window.add_effect(1)
+        QTimer.singleShot(50, lambda: QApplication.activeModalWidget().reject())
+        window.choose_project()
+    pump(qapp, 0.05)
+    assert not window.findChildren(VstDialog) and not window.findChildren(ProjectDialog)

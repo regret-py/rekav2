@@ -442,6 +442,7 @@ class VoicemeeterController(QObject):
             if failing:
                 log.info("Voicemeeter répond de nouveau.")
                 failing = False
+                self._reassert_inserts()
             self._set_connected(True)
 
             next_tick += self._interval
@@ -455,11 +456,33 @@ class VoicemeeterController(QObject):
             writes, self._writes = self._writes, {}
             inserts, self._inserts_wanted = self._inserts_wanted, None
         expire = time.monotonic() + ECHO_GUARD_S
-        for param, value in writes.items():
-            self._remote.set(param, value)
-            self._echo[param] = (expire, value)
-        if inserts is not None:
-            self._apply_inserts(inserts)
+        pending = list(writes.items())
+        try:
+            while pending:
+                param, value = pending[0]
+                self._remote.set(param, value)
+                self._echo[param] = (expire, value)
+                pending.pop(0)
+            if inserts is not None:
+                self._apply_inserts(inserts)
+        except Exception:
+            # Voicemeeter ne répond plus : rien de ce qui n'a pas été envoyé n'est
+            # perdu (une valeur plus récente demandée entre-temps reste prioritaire)
+            with self._lock:
+                for param, value in pending:
+                    self._writes.setdefault(param, value)
+                if inserts is not None and self._inserts_wanted is None:
+                    self._inserts_wanted = inserts
+            raise
+
+    def _remote_get(self, param: str) -> float:
+        """Lit un paramètre auprès de Voicemeeter. voicemeeterlib garde en cache
+        la dernière valeur écrite et la renverrait à la place de la vraie : un
+        mute fait dans Voicemeeter (ou par une macro) serait ignoré."""
+        cache = getattr(self._remote, "cache", None)
+        if isinstance(cache, dict):
+            cache.pop(param, None)
+        return float(self._remote.get(param))
 
     def _get(self, param: str) -> float:
         """Lit un paramètre ; juste après une écriture, renvoie la valeur écrite
@@ -469,7 +492,7 @@ class VoicemeeterController(QObject):
             if echo[0] > time.monotonic():
                 return float(echo[1])
             del self._echo[param]
-        return float(self._remote.get(param))
+        return self._remote_get(param)
 
     def _read_params(self) -> None:
         strips = []
@@ -518,8 +541,10 @@ class VoicemeeterController(QObject):
                 param = f"patch.insert[{channel}]"
                 if enable:
                     if channel not in self._inserts_saved:
-                        self._inserts_saved[channel] = float(self._remote.get(param))
+                        previous = self._remote_get(param)
                         self._remote.set(param, 1.0)
+                        # noté seulement une fois l'insert activé : un échec sera retenté
+                        self._inserts_saved[channel] = previous
                         changed = True
                 elif channel in self._inserts_saved:
                     self._remote.set(param, self._inserts_saved.pop(channel))
@@ -527,6 +552,19 @@ class VoicemeeterController(QObject):
             if changed:
                 log.info("Insert Voicemeeter de la strip %d (VM %d) %s.", index, vm_strip,
                          "activé" if enable else "rendu à son état d'origine")
+
+    def _reassert_inserts(self) -> None:
+        """Après une coupure (Voicemeeter relancé, plantage) : les inserts que
+        REKA avait activés le sont de nouveau, sinon les effets seraient
+        contournés jusqu'au redémarrage de REKA."""
+        try:
+            for channel in sorted(self._inserts_saved):
+                self._remote.set(f"patch.insert[{channel}]", 1.0)
+        except Exception as exc:
+            log.warning("Inserts Voicemeeter non réactivés : %s", exc)
+        else:
+            if self._inserts_saved:
+                log.info("Inserts Voicemeeter réactivés après la reconnexion.")
 
     def _set_connected(self, connected: bool) -> None:
         if connected != self._connected:

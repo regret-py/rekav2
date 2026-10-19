@@ -441,7 +441,6 @@ class SettingsDialog(QDialog):
     def _widgets_group(self) -> QGroupBox:
         group = QGroupBox("Police et widgets")
         form = QFormLayout(group)
-        ui_cfg = self._cfg.setdefault("ui", {})
         self.font_choice = QFontComboBox()
         self.font_choice.setCurrentFont(styles.font(11))
         self.font_choice.setCurrentText(styles.FONT_FAMILY)

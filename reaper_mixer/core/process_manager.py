@@ -518,16 +518,19 @@ class ProcessManager:
         self._start(voicemeeter_spec(kind), args=[])
 
     def start_reaper(self, prepare: Callable[[Path], dict[str, str]] | None = None,
-                     project: str | None = None) -> None:
+                     project: str | None = None) -> bool:
         """Lance REAPER sur un projet : `project` s'il est donné ("" = projet
         vierge de REKA), sinon le projet par défaut de la config.
 
         `prepare(exe)` est appelé avant le lancement avec le chemin de reaper.exe
         (installation du pont Lua) et renvoie des variables d'environnement à
-        transmettre au processus."""
+        transmettre au processus.
+
+        Renvoie True si un REAPER déjà lancé a été repris : il n'a pas reçu le
+        projet en argument, il faudra l'ouvrir une fois le pont connecté."""
         path = reaper_project(self._cfg, project)
         args = ["-nosplash"] + ([str(path)] if path else [])
-        self._start(REAPER_SPEC, args=args, prepare=prepare)
+        return self._start(REAPER_SPEC, args=args, prepare=prepare)
 
     def start_flstudio(self) -> None:
         """Lance FL Studio (masqué), sur le projet flstudio.project s'il existe."""
@@ -644,12 +647,14 @@ class ProcessManager:
 
     # -------------------------------------------------------------- lancement
     def _start(self, spec: AppSpec, args: list[str],
-               prepare: Callable[[Path], dict[str, str]] | None = None) -> None:
+               prepare: Callable[[Path], dict[str, str]] | None = None) -> bool:
+        """Lance (ou reprend) une application ; True si une instance déjà
+        ouverte a été reprise (elle n'a pas reçu `args`)."""
         if self._abort.is_set():
             raise StartupAborted()
         current = self._get(spec.key)
         if current is not None and current.is_alive():
-            return
+            return True
 
         section = self._section(spec.key)
         exe = find_executable(spec, section.get("path"))
@@ -658,7 +663,8 @@ class ProcessManager:
         section["path"] = str(exe)  # mémorisé : plus de recherche au prochain lancement
         env = prepare(exe) if prepare is not None else {}
 
-        managed = self._adopt_running(spec) or self._launch(spec, exe, args, env)
+        adopted = self._adopt_running(spec)
+        managed = adopted or self._launch(spec, exe, args, env)
         with self._lock:
             self._procs[spec.key] = managed
         self._save_state()
@@ -666,6 +672,7 @@ class ProcessManager:
         timeout = float(section.get("window_timeout_s", DEFAULT_WINDOW_TIMEOUT_S))
         self._hide_when_ready(managed, timeout)
         self._ensure_watchdog()
+        return adopted is not None
 
     def _adopt_running(self, spec: AppSpec) -> ManagedProcess | None:
         """Reprend une instance déjà ouverte, si on en a le droit."""

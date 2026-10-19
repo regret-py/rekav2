@@ -508,9 +508,11 @@ class MainWindow(QMainWindow):
         else:
             exe = self._processes.executable("reaper") if self._processes is not None else None
             dialog = VstDialog(strip.strip_name(), host, host.resource_path(exe), extra_dirs, self)
-        if dialog.exec() and dialog.selected is not None:
-            log.info("Ajout de %s sur %s", dialog.selected.add_name, strip.strip_name())
-            host.add_fx(index, dialog.selected.add_name)
+        selected = dialog.selected if dialog.exec() else None
+        delete_now(dialog)        # sinon chaque ouverture garderait un dialogue (et sa liste) en mémoire
+        if selected is not None:
+            log.info("Ajout de %s sur %s", selected.add_name, strip.strip_name())
+            host.add_fx(index, selected.add_name)
 
     def choose_apo_device(self, index: int) -> bool:
         """Périphérique Windows d'une strip pour Equalizer APO (micro…)."""
@@ -728,10 +730,12 @@ class MainWindow(QMainWindow):
         """Choix du projet REAPER ; il est ouvert tout de suite, sans redémarrer."""
         session_cfg = running_config(self._cfg, self._vm)
         dialog = ProjectDialog(session_cfg, current=self._reaper.project_path, parent=self)
-        if not dialog.exec():
+        accepted, selected = bool(dialog.exec()), dialog.selected
+        delete_now(dialog)
+        if not accepted:
             return
         self._save_config()
-        path = reaper_project(session_cfg, dialog.selected)
+        path = reaper_project(session_cfg, selected)
         if path is None:
             self.toast.show_message("Projet introuvable.")
             return

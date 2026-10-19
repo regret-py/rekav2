@@ -117,7 +117,13 @@ def load_config() -> dict[str, Any]:
             broken = user_path.with_name("config.invalide.json")
             log.error("Config utilisateur illisible (%s) : renommée en %s, "
                       "retour aux valeurs par défaut.", exc, broken.name)
-            os.replace(user_path, broken)
+            try:
+                os.replace(user_path, broken)
+            except OSError as move_error:
+                # Fichier verrouillé : on démarre quand même sur les défauts
+                log.error("Config illisible non renommée (%s) : valeurs par défaut "
+                          "pour cette session.", move_error)
+                return _deep_merge(defaults, {})
 
     cfg = _deep_merge(defaults, user)
     if not user_path.is_file():
