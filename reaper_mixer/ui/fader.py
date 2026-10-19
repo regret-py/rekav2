@@ -13,11 +13,17 @@ from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from ui import styles
 
+# Même plage que Voicemeeter (Strip.Gain, GainLayer, Bus.Gain : -60 à +12 dB)
 FADER_MIN_DB = -60.0
-FADER_MAX_DB = 0.0
-SCALE_MARKS = (0, -6, -12, -24, -48)
-# (dB, position depuis le haut de la course, 0 → 1)
-TAPER = ((0.0, 0.0), (-6.0, 0.152), (-12.0, 0.278), (-24.0, 0.479), (-48.0, 0.729), (-60.0, 1.0))
+FADER_MAX_DB = 12.0
+SCALE_MARKS = (12, 6, 0, -6, -12, -24, -48)
+# (dB, position depuis le haut de la course, 0 → 1) : la loi relevée sur la
+# maquette (0 → -60 dB) occupe les 85 % du bas, la réserve 0 → +12 dB le haut
+_HEADROOM = 0.15
+TAPER = ((12.0, 0.0), (6.0, _HEADROOM / 2),
+         *((db, _HEADROOM + (1 - _HEADROOM) * pos)
+           for db, pos in ((0.0, 0.0), (-6.0, 0.152), (-12.0, 0.278), (-24.0, 0.479),
+                           (-48.0, 0.729), (-60.0, 1.0))))
 
 THUMB_W, THUMB_H = 22, 22
 TRACK_MARGIN = THUMB_H // 2 + 1   # marge haute/basse de la course (à reprendre dans les VU)
@@ -28,7 +34,7 @@ WHEEL_STEP_DB = 0.5
 
 
 def db_to_ratio(db: float) -> float:
-    """dB → position dans la course (0 = haut / 0 dB, 1 = bas / -60 dB)."""
+    """dB → position dans la course (0 = haut / +12 dB, 1 = bas / -60 dB)."""
     db = max(FADER_MIN_DB, min(FADER_MAX_DB, db))
     for (db_hi, pos_hi), (db_lo, pos_lo) in zip(TAPER, TAPER[1:]):
         if db >= db_lo:
@@ -45,7 +51,10 @@ def ratio_to_db(ratio: float) -> float:
 
 
 def format_db(db: float) -> str:
-    return "-inf" if db <= FADER_MIN_DB else f"{db:.2f}"
+    """Valeur affichée comme dans Voicemeeter : une décimale, bornée à -60 / +12."""
+    db = max(FADER_MIN_DB, min(FADER_MAX_DB, db))
+    text = f"{db:.1f}"
+    return "0.0" if text == "-0.0" else text
 
 
 class Fader(QWidget):
@@ -114,7 +123,8 @@ class Fader(QWidget):
             label_color = styles.TEXT_SECONDARY if mark == 0 else styles.TEXT_MUTED
             p.setPen(styles.color(label_color, 0.9 if mark == 0 else 0.75))
             p.drawText(QRectF(0, y - 6, SCALE_W - 5, 12),
-                       Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, str(mark))
+                       Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                       f"+{mark}" if mark > 0 else str(mark))
             p.setPen(QPen(styles.color(styles.GREEN_SCALE), 1))
             p.drawLine(QPointF(SCALE_W - 3, y), QPointF(SCALE_W, y))
 

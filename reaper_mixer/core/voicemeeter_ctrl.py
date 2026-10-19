@@ -122,7 +122,8 @@ def amp_to_db(value: float) -> float:
 
 
 def _clamp_gain(db: float) -> float:
-    return round(max(GAIN_MIN_DB, min(GAIN_MAX_DB, float(db))), 2)
+    """Gain envoyé à Voicemeeter : sa plage, au dixième de dB (sa précision d'affichage)."""
+    return round(max(GAIN_MIN_DB, min(GAIN_MAX_DB, float(db))), 1)
 
 
 # --- Intellipan -------------------------------------------------------------

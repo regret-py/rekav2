@@ -31,17 +31,23 @@ def test_config_merge_and_corrupted_file(appdata):
 
 # --------------------------------------------------------------- loi du fader
 def test_fader_taper_matches_mockup_and_roundtrips():
-    from ui.fader import db_to_ratio, ratio_to_db
+    from ui.fader import db_to_ratio, format_db, ratio_to_db
 
-    assert db_to_ratio(0) == 0 and db_to_ratio(-60) == 1 and db_to_ratio(12) == 0
-    assert db_to_ratio(-6) == pytest.approx(0.152) and db_to_ratio(-48) == pytest.approx(0.729)
+    # Plage de Voicemeeter : +12 dB en haut, -60 dB en bas ; sous 0 dB, la loi de la maquette
+    assert db_to_ratio(12) == 0 and db_to_ratio(-60) == 1 and db_to_ratio(20) == 0
+    assert db_to_ratio(0) == pytest.approx(0.15)
+    assert db_to_ratio(-6) == pytest.approx(0.15 + 0.85 * 0.152)
+    assert db_to_ratio(-48) == pytest.approx(0.15 + 0.85 * 0.729)
     previous = -1.0
-    for tenth in range(0, 601):
-        db = -tenth / 10
+    for tenth in range(120, -601, -1):
+        db = tenth / 10
         ratio = db_to_ratio(db)
         assert ratio > previous
         previous = ratio
         assert ratio_to_db(ratio) == pytest.approx(db, abs=1e-6)
+    # Affichage identique à Voicemeeter : une décimale, -60.0 en bas (pas de « -inf »)
+    assert [format_db(v) for v in (-60, -75, -12.37, -0.04, 0, 6, 12.5)] == [
+        "-60.0", "-60.0", "-12.4", "0.0", "0.0", "6.0", "12.0"]
 
 
 # ------------------------------------------------------------ pont REAPER

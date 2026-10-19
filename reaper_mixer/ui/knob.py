@@ -31,7 +31,7 @@ SMOOTH_FACTOR = 0.28
 
 
 def _position(db: float) -> float:
-    """dB → position sur la course (0 = -60 dB, 1 = 0 dB)."""
+    """dB → position sur la course (0 = -60 dB, 1 = +12 dB)."""
     return 1.0 - db_to_ratio(db)
 
 
