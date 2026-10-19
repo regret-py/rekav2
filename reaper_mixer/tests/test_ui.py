@@ -70,7 +70,7 @@ def test_fader_mute_and_value_label(qapp, mixer):
     drag(fader, (fader._rail_x(), y), (fader._rail_x(), y + 200))
     pump(qapp, 0.05)
     assert vm._strips[1].gain < -10
-    assert strip.value_label.text().startswith(f"{vm._strips[1].gain:.2f}")
+    assert strip.value_label.text().startswith(f"{vm._strips[1].gain:.1f}")
     send(fader, QEvent.Type.MouseButtonDblClick, (fader._rail_x(), fader._y_for(fader.value())))
     pump(qapp, 0.05)
     assert vm._strips[1].gain == 0.0
@@ -140,7 +140,7 @@ def test_headphone_knob_smooth(qapp, mixer):
     assert vm._headphone < 0 and knob._timer.isActive()      # interpolation en cours
     pump(qapp, 0.5)
     assert not knob._timer.isActive()
-    assert window.master.value_label.text() == f"{vm._headphone:.2f} dB"
+    assert window.master.value_label.text() == f"{vm._headphone:.1f} dB"
 
 
 def test_project_button_switches_project(qapp, mixer, tmp_path):
@@ -652,3 +652,27 @@ def test_font_widget_styles_and_rename_from_settings(qapp, mixer):
         window.apply_appearance()
         dialog.done(0)
     assert styles.FONT_FAMILY == styles.DEFAULT_FONT and styles.FADER_STYLE == "console"
+
+
+def test_gains_follow_voicemeeter_range_above_0db(qapp, mixer):
+    """Un gain réglé dans Voicemeeter (jusqu'à +12 dB) s'affiche tel quel, et la
+    molette part de cette valeur au lieu de la ramener à 0 dB."""
+    from dataclasses import replace
+
+    from core.voicemeeter_ctrl import MixerParams
+
+    window, vm, _ = mixer
+    strip = window.strips[0]
+    strips = list(vm._strips)
+    strips[0] = replace(strips[0], gain=6.0)
+    window._on_params(MixerParams(tuple(strips), 9.5))
+    pump(qapp, 0.05)
+    assert strip.value_label.text().startswith("6.0") and strip.fader.value() == 6.0
+    assert strip.fader._y_for(6.0) < strip.fader._y_for(0.0)       # au-dessus de 0 dB
+    assert window.master.value_label.text() == "9.5 dB"
+    event = QWheelEvent(QPointF(20, 20), strip.fader.mapToGlobal(QPointF(20, 20)), QPoint(0, 0),
+                        QPoint(0, 120), NONE, Qt.KeyboardModifier.NoModifier,
+                        Qt.ScrollPhase.NoScrollPhase, False)
+    QApplication.sendEvent(strip.fader, event)
+    pump(qapp, 0.05)
+    assert vm._strips[0].gain == 6.5
