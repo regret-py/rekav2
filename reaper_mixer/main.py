@@ -668,7 +668,9 @@ def run_selftest(app: QApplication, cfg: dict, window: MainWindow, vm, reaper, p
 
     for path, widget in shots.items():
         capture(path, widget)
-    for index, suffix in ((2, "apparence"), (3, "apropos")):   # autres onglets des réglages
+    for title, suffix in (("Canaux", "canaux"), ("Apparence", "apparence"),
+                          ("À propos", "apropos")):              # autres onglets des réglages
+        index = next(i for i in range(settings.tabs.count()) if settings.tabs.tabText(i) == title)
         settings.tabs.setCurrentIndex(index)
         pump(0.2)
         capture(image.with_name(f"{image.stem}_{suffix}{image.suffix}"), settings)
