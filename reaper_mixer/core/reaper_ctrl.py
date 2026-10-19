@@ -31,9 +31,10 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject
 
 from core import config
+from core.effects import HOST_REAPER, EffectsHost, samples_to_ms
 from core.voicemeeter_ctrl import strip_channels
 
 log = logging.getLogger(__name__)
@@ -64,6 +65,7 @@ class FxInfo:
     name: str          # nom complet donné par REAPER
     enabled: bool
     open: bool
+    latency: int = -1  # latence du plugin (PDC) en échantillons, -1 = inconnue
 
     @property
     def display_name(self) -> str:
@@ -135,6 +137,7 @@ class _BridgeState:
     tracks: list[TrackInfo]
     errors: list[tuple[int, str]]
     project: str = ""
+    latency: tuple[int, int] | None = None   # latences d'entrée / sortie de la carte son
 
 
 def _escape(value: object) -> str:
@@ -187,8 +190,12 @@ def parse_state(text: str) -> _BridgeState | None:
                                hw_outputs=extra[3])
                 track_rows.append(row)
             elif key == "FX" and len(fields) >= 5:
+                pdc = int(float(fields[5])) if len(fields) >= 6 and fields[5] else -1
                 fx_by_track.setdefault(int(fields[0]), []).append(
-                    FxInfo(name=fields[2], enabled=fields[3] == "1", open=fields[4] == "1"))
+                    FxInfo(name=fields[2], enabled=fields[3] == "1", open=fields[4] == "1",
+                           latency=pdc))
+            elif key == "LATENCY" and len(fields) >= 2:
+                state.latency = (int(float(fields[0])), int(float(fields[1])))
             elif key == "ERR" and len(fields) >= 2:
                 state.errors.append((int(fields[0]), fields[1]))
         except ValueError:
@@ -210,17 +217,22 @@ def reaper_resource_path(exe: Path | None, configured: str | None = None) -> Pat
     return config.app_data_dir().parent / "REAPER"
 
 
-class ReaperController(QObject):
-    connection_changed = Signal(bool)
-    tracks_changed = Signal(object)       # list[TrackInfo | None], une entrée par strip
-    device_changed = Signal(object)       # AudioDevice
-    project_changed = Signal(str)         # chemin du projet ouvert dans REAPER
-    installed_fx_ready = Signal(object)   # list[(nom, ident)] ou None si indisponible
-    command_failed = Signal(str)
+def track_latency_samples(track: TrackInfo | None) -> int:
+    """Latence (PDC) des plugins actifs d'une piste, en échantillons."""
+    if track is None or not track.fx_enabled:
+        return 0
+    return sum(max(0, fx.latency) for fx in track.fx if fx.enabled)
+
+
+class ReaperController(EffectsHost):
+    kind = HOST_REAPER
+    process_key = "reaper"
+    manages_fx = True
+    has_projects = True
+    has_audio_device = True
 
     def __init__(self, cfg: dict, parent: QObject | None = None) -> None:
-        super().__init__(parent)
-        self._cfg = cfg
+        super().__init__(cfg, parent)
         # Une strip est désignée auprès du pont par son premier canal d'insert
         self._channels = strip_channels(cfg)
         self._ipc_dir = config.app_data_dir() / "bridge"
@@ -247,7 +259,7 @@ class ReaperController(QObject):
         self._fx_request: tuple[str, float] | None = None
         self._installed_fx: list[tuple[str, str]] | None = None
         self._error_file_logged = False
-        self.version = ""
+        self._io_latency: tuple[int, int] | None = None
 
     # --------------------------------------------------------- préparation
     @property
@@ -277,6 +289,63 @@ class ReaperController(QObject):
 
     def resource_path(self, exe: Path | None) -> Path:
         return reaper_resource_path(exe, self._cfg.get("reaper", {}).get("resource_path"))
+
+    # ------------------------------------------------------------ insert
+    def insert_strips(self, tracks: list, connected: bool) -> set[int]:
+        """Insert seulement pour les strips dont la piste traite vraiment le son
+        (armée, écoutée, avec une sortie), et quand REAPER tourne sur le pilote
+        de l'insert : sinon la strip serait muette."""
+        device = self._device
+        if not connected or device is None or not device.is_voicemeeter_insert:
+            return set()
+        return {i for i, track in enumerate(tracks) if track is not None and track.processes_live}
+
+    # ----------------------------------------------------------- latence
+    def _samplerate(self) -> float:
+        try:
+            return float(self._device.samplerate) if self._device is not None else 0.0
+        except ValueError:
+            return 0.0
+
+    def strip_latency_ms(self, strip: int) -> float | None:
+        tracks = self._tracks or []
+        rate = self._samplerate()
+        if strip >= len(tracks) or tracks[strip] is None or rate <= 0:
+            return None
+        return samples_to_ms(track_latency_samples(tracks[strip]), rate)
+
+    def fx_latency_ms(self, strip: int, fx_index: int) -> float | None:
+        tracks = self._tracks or []
+        rate = self._samplerate()
+        if strip >= len(tracks) or tracks[strip] is None or rate <= 0:
+            return None
+        fx = tracks[strip].fx
+        if not 0 <= fx_index < len(fx) or fx[fx_index].latency < 0:
+            return None
+        return samples_to_ms(fx[fx_index].latency, rate)
+
+    def latency_report(self) -> str:
+        device, rate = self._device, self._samplerate()
+        if device is None or rate <= 0:
+            return "Latence inconnue : REAPER n'a pas encore indiqué sa carte son."
+        if self._io_latency is not None and sum(self._io_latency) > 0:
+            buffers = sum(self._io_latency)
+            detail = f"entrée {self._io_latency[0]} + sortie {self._io_latency[1]} échantillons"
+        else:
+            try:
+                buffers = 2 * int(device.blocksize)
+            except ValueError:
+                buffers = 0
+            detail = f"2 × {device.blocksize} échantillons"
+        text = (f"Aller-retour par REAPER : {samples_to_ms(buffers, rate):.1f} ms "
+                f"({detail} à {device.samplerate} Hz)")
+        worst = max(((self.strip_latency_ms(i) or 0.0, i) for i in range(len(self._channels))),
+                    default=(0.0, 0))
+        if worst[0] >= 0.05:
+            names = self._cfg.get("ui", {}).get("strip_names", [])
+            name = names[worst[1]] if worst[1] < len(names) else f"Strip {worst[1] + 1}"
+            text += f", plus {worst[0]:.1f} ms de plugins sur « {name} »"
+        return text + "."
 
     def prepare_launch(self, exe: Path) -> dict[str, str]:
         """Installe le pont avant le lancement de REAPER ; renvoie les
@@ -431,6 +500,7 @@ class ReaperController(QObject):
 
     def _apply_state(self, state: _BridgeState) -> None:
         self.version = state.version
+        self._io_latency = state.latency
         with self._lock:
             pruned = [p for p in self._pending if p[0] > state.ack]
             if len(pruned) != len(self._pending):

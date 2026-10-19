@@ -2,12 +2,16 @@
 REKA — point d'entrée.
 
 Séquence de démarrage :
-  1. Lecture de config.json (défauts + copie utilisateur dans %APPDATA%)
-     et, si demandé, choix du projet REAPER à ouvrir
-  2. Lancement + masquage de Voicemeeter Potato
-  3. Installation du pont Lua, puis lancement + masquage de REAPER sur le projet
+  1. Lecture de config.json (défauts + copie utilisateur dans %APPDATA%) ;
+     au premier lancement, menu de sélection de l'édition de Voicemeeter et
+     du moteur d'effets (REAPER, FL Studio, Equalizer APO ou aucun) ; si
+     demandé, choix du projet REAPER à ouvrir
+  2. Lancement + masquage de Voicemeeter (Potato ou Banana)
+  3. Moteur d'effets : REAPER (pont Lua installé, puis lancement + masquage
+     sur le projet) ou FL Studio (lancement + masquage) ; Equalizer APO et
+     « aucun » n'ont pas de processus à lancer
   4. Login à l'API Remote de Voicemeeter (nouvel essai toutes les 5 s)
-  5. Attente du pont REAPER (battement de cœur)
+  5. REAPER : attente du pont (battement de cœur)
   6. Affichage de la fenêtre principale
 
 Les étapes 2 à 5 sont bloquantes : elles tournent dans un QThread pendant
@@ -18,6 +22,8 @@ puis arrêt des processus lancés par l'app.
 
 Options :
   --demo            interface avec des moteurs simulés (sans Voicemeeter ni REAPER)
+  --host MOTEUR     en démo : moteur d'effets à simuler (reaper, flstudio, apo, none)
+  --setup           ouvre le menu de sélection des moteurs avant de démarrer
   --selftest IMAGE  rend la console en démo dans IMAGE puis quitte (vérif de build)
 """
 
@@ -45,7 +51,7 @@ from core.app_volume import create_backend
 from core.process_manager import (AppNotInstalledError, OtherEditionRunningError, ProcessManager,
                                   ProcessManagerError, StartupAborted,
                                   installed_voicemeeter_kinds)
-from core.reaper_ctrl import ReaperController
+from core.effects import HOST_REAPER, EffectsHost, create_host
 from core.updater import UpdateChecker, cleanup_previous, load_build_info
 from core.voicemeeter_ctrl import EDITIONS, VoicemeeterController, edition
 from ui import styles
@@ -219,7 +225,7 @@ class StartupTimeout(Exception):
 
 
 class StartupWorker(QThread):
-    """Lance Voicemeeter et REAPER puis attend que les deux répondent.
+    """Lance Voicemeeter et le moteur d'effets puis attend qu'ils répondent.
 
     Les contrôleurs sont créés dans le thread principal (affinité Qt) ; ce
     thread n'appelle que leurs méthodes bloquantes de connexion.
@@ -230,13 +236,13 @@ class StartupWorker(QThread):
     succeeded = Signal()
 
     def __init__(self, cfg: dict, processes: ProcessManager,
-                 vm: VoicemeeterController, reaper: ReaperController,
+                 vm: VoicemeeterController, host: EffectsHost,
                  project: str | None = None) -> None:
         super().__init__()
         self._cfg = cfg
         self._processes = processes
         self._vm = vm
-        self._reaper = reaper
+        self._host = host
         self._project = project       # None = projet par défaut de la config
         self._cancel = threading.Event()
 
@@ -261,21 +267,29 @@ class StartupWorker(QThread):
             self.succeeded.emit()
 
     def _boot(self) -> None:
-        vm_cfg, reaper_cfg = self._cfg["voicemeeter"], self._cfg["reaper"]
+        vm_cfg = self._cfg.setdefault("voicemeeter", {})
+        reaper_cfg = self._cfg.setdefault("reaper", {})
+        host = self._host
 
         self.progress.emit("Lancement de Voicemeeter…")
         self._processes.start_voicemeeter()
 
-        self.progress.emit("Lancement de REAPER…")
-        self._processes.start_reaper(prepare=self._reaper.prepare_launch, project=self._project)
+        if host.process_key == "reaper":
+            self.progress.emit("Lancement de REAPER…")
+            self._processes.start_reaper(prepare=host.prepare_launch, project=self._project)
+        elif host.process_key == "flstudio":
+            self.progress.emit("Lancement de FL Studio…")
+            self._processes.start_flstudio()
 
         self.progress.emit("Connexion à Voicemeeter…")
         self._retry("l'API Remote de Voicemeeter", self._vm.login,
                     timeout_s=float(vm_cfg.get("login_timeout_s", 30)),
                     interval_s=float(vm_cfg.get("login_retry_s", 5)))
 
+        if host.kind != HOST_REAPER:
+            return             # les autres moteurs démarrent avec la fenêtre (thread UI)
         self.progress.emit("Connexion à REAPER…")
-        self._reaper.start()
+        host.start()
         self._retry("REAPER", self._ping_reaper,
                     timeout_s=float(reaper_cfg.get("bridge_timeout_s", 60)),
                     interval_s=BRIDGE_RETRY_S,
@@ -285,7 +299,7 @@ class StartupWorker(QThread):
                           "n'attend une réponse."))
 
     def _ping_reaper(self) -> None:
-        if not self._reaper.ping(timeout_s=BRIDGE_PING_TIMEOUT_S):
+        if not self._host.ping(timeout_s=BRIDGE_PING_TIMEOUT_S):
             raise TimeoutError("le pont REKA ne répond pas encore")
 
     def _retry(self, what: str, action: Callable[[], object], *,
@@ -320,7 +334,7 @@ class MixerApp:
         self._log_path = log_path
         self._processes = ProcessManager(cfg)
         self._vm = VoicemeeterController(cfg)
-        self._reaper = ReaperController(cfg)
+        self._host = create_host(cfg, self._processes)
         self._updater = UpdateChecker(cfg, load_build_info())
         self._splash = SplashScreen()
         self._worker: StartupWorker | None = None
@@ -329,7 +343,8 @@ class MixerApp:
         self._stopped = False
 
     def start(self) -> None:
-        if self._cfg.get("reaper", {}).get("ask_project_on_start", False):
+        if (self._host.has_projects
+                and self._cfg.get("reaper", {}).get("ask_project_on_start", False)):
             self._ask_project()
         self._splash.show()
         self._boot()
@@ -347,7 +362,7 @@ class MixerApp:
     # --------------------------------------------------------------- démarrage
     def _boot(self) -> None:
         self._splash.set_status("Démarrage…")
-        self._worker = StartupWorker(self._cfg, self._processes, self._vm, self._reaper,
+        self._worker = StartupWorker(self._cfg, self._processes, self._vm, self._host,
                                      project=self._project)
         self._worker.progress.connect(self._splash.set_status)
         self._worker.succeeded.connect(self._on_ready)
@@ -358,8 +373,10 @@ class MixerApp:
         try:
             config.save_config(self._cfg)  # chemins auto-détectés mémorisés
             self._window = MainWindow(cfg=self._cfg, vm=self._vm,
-                                      reaper=self._reaper, processes=self._processes,
+                                      reaper=self._host, processes=self._processes,
                                       apps=create_backend(self._cfg), updater=self._updater)
+            if self._host.kind != HOST_REAPER:
+                self._host.start()    # FL Studio, Equalizer APO : dans le thread UI
         except Exception as exc:
             # Sans fenêtre, l'app tournerait à vide : on prévient et on quitte
             log.exception("Impossible de créer la fenêtre principale")
@@ -402,6 +419,10 @@ class MixerApp:
         box.setInformativeText(
             f"S'il est déjà installé ailleurs, clique sur « Localiser… » "
             f"et sélectionne {exc.exe_name}.")
+        # REAPER / FL Studio absent : un autre moteur d'effets peut convenir
+        engines = None
+        if exc.config_key in ("reaper", "flstudio"):
+            engines = box.addButton("Changer de moteur d'effets…", QMessageBox.ButtonRole.ActionRole)
         # Voicemeeter : une autre édition est peut-être installée (Banana seule…)
         other = None
         if exc.config_key == "voicemeeter":
@@ -426,6 +447,11 @@ class MixerApp:
             if switch is not None and clicked is switch:
                 self._switch_edition(other)
                 return False
+            if engines is not None and clicked is engines:
+                if self.choose_engines():
+                    self._relaunch("Moteur d'effets enregistré : relance REKA pour l'utiliser.")
+                    return False
+                continue
             if clicked is download:
                 QDesktopServices.openUrl(QUrl(exc.download_url))
                 continue  # la popup reste là le temps d'installer
@@ -435,7 +461,7 @@ class MixerApp:
                     os.environ.get("ProgramFiles", ""), "Exécutable (*.exe)")
                 if not path:
                     continue
-                self._cfg[exc.config_key]["path"] = path
+                self._cfg.setdefault(exc.config_key, {})["path"] = path
                 config.save_config(self._cfg)
                 log.info("%s localisé manuellement : %s", exc.app_name, path)
                 return True
@@ -468,9 +494,22 @@ class MixerApp:
         log.info("Passage sur l'édition %s de Voicemeeter.", kind)
         self._cfg.setdefault("voicemeeter", {})["kind"] = kind
         config.save_config(self._cfg)
+        self._relaunch("Édition enregistrée : relance REKA pour l'utiliser.")
+
+    def _relaunch(self, fallback_message: str) -> None:
         if not launch_restart():
-            QMessageBox.information(None, config.APP_NAME,
-                                    "Édition enregistrée : relance REKA pour l'utiliser.")
+            QMessageBox.information(None, config.APP_NAME, fallback_message)
+
+    def choose_engines(self, first_run: bool = False) -> bool:
+        """Menu de sélection de l'édition de Voicemeeter et du moteur d'effets.
+        True si l'utilisateur a validé (la config est alors enregistrée)."""
+        from ui.setup_dialog import SetupDialog
+
+        dialog = SetupDialog(self._cfg, first_run=first_run)
+        if not dialog.exec():
+            return False
+        config.save_config(self._cfg)
+        return True
 
     def show_window(self) -> bool:
         """REKA relancée alors qu'elle tourne déjà (cachée près de l'horloge…) :
@@ -520,9 +559,10 @@ class MixerApp:
         # Ordre important : REAPER se ferme pendant que Voicemeeter (donc le
         # pilote ASIO de l'insert) tourne encore, sinon REAPER afficherait une
         # erreur de carte son en partant.
-        _safely(self._reaper.close, save_project=True)   # sauvegarde du projet
+        _safely(self._host.close, save_project=True)     # sauvegarde du projet REAPER
         _safely(self._vm.release)                         # inserts rendus
-        _safely(self._processes.stop, "reaper")
+        if self._host.process_key:
+            _safely(self._processes.stop, self._host.process_key)
         _safely(self._vm.close, shutdown_app=self._processes.will_terminate("voicemeeter"))
         # La fenêtre a écrit son état dans la config (closeEvent)
         _safely(config.save_config, self._cfg)
@@ -599,20 +639,40 @@ def listen_for_show_requests(on_show: Callable[[], bool]) -> QLocalServer:
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog=config.APP_NAME, add_help=False)
     parser.add_argument("--demo", action="store_true")
+    parser.add_argument("--host", choices=("reaper", "flstudio", "apo", "none"))
+    parser.add_argument("--setup", action="store_true")
     parser.add_argument("--selftest", metavar="IMAGE")
     parser.add_argument("--restart", action="store_true")  # relance depuis les réglages
     args, _qt_args = parser.parse_known_args(argv[1:])
     return args
 
 
-def run_demo(app: QApplication, cfg: dict, selftest: str | None) -> int:
+def demo_host(cfg: dict, kind: str | None, processes) -> EffectsHost:
+    """Moteur d'effets simulé : REAPER par défaut ; les autres sont les vrais
+    contrôleurs, branchés sur des données de démo."""
+    from core.demo import DemoReaper
+
+    if kind in (None, HOST_REAPER):
+        return DemoReaper(cfg)
+    cfg.setdefault("effects", {})["host"] = kind
+    if kind == "apo":
+        demo_dir = config.app_data_dir() / "apo-demo"
+        demo_dir.mkdir(parents=True, exist_ok=True)
+        cfg.setdefault("apo", {})["config_dir"] = str(demo_dir)
+    return create_host(cfg, processes)
+
+
+def run_demo(app: QApplication, cfg: dict, selftest: str | None, host: str | None = None) -> int:
     """Console avec des moteurs simulés ; avec --selftest, capture puis quitte."""
     from core.app_volume import DemoAppVolumes
-    from core.demo import DemoProcesses, DemoReaper, DemoVoicemeeter
+    from core.demo import DemoProcesses, DemoVoicemeeter
 
-    vm, reaper, processes = DemoVoicemeeter(cfg), DemoReaper(cfg), DemoProcesses()
+    vm, processes = DemoVoicemeeter(cfg), DemoProcesses()
+    reaper = demo_host(cfg, host, processes)
     window = MainWindow(cfg=cfg, vm=vm, reaper=reaper, processes=processes, persist=False,
                         apps=DemoAppVolumes())
+    if reaper.kind != HOST_REAPER:
+        reaper.start()
     if selftest is None:
         app.setQuitOnLastWindowClosed(True)
         window.show()
@@ -794,7 +854,7 @@ def main() -> int:
     styles.apply_theme(app, float(ui_cfg.get("panel_opacity", 1.0)), ui_cfg.get("theme"))
 
     if args.demo or args.selftest:
-        return run_demo(app, cfg, args.selftest)
+        return run_demo(app, cfg, args.selftest, args.host)
 
     # Une seule instance : deux consoles se disputeraient Voicemeeter et REAPER.
     # Après un redémarrage, on laisse à l'ancienne instance le temps de s'arrêter.
@@ -811,6 +871,16 @@ def main() -> int:
     # Après une mise à jour : l'ancien exe (encore verrouillé un instant) est supprimé
     if not cleanup_previous():
         QTimer.singleShot(OLD_EXE_RETRY_MS, cleanup_previous)
+
+    # Premier lancement (ou --setup) : édition de Voicemeeter et moteur d'effets
+    if args.setup or not cfg.get("setup_done", False):
+        from ui.setup_dialog import SetupDialog
+
+        dialog = SetupDialog(cfg, first_run=not args.setup)
+        if not dialog.exec():
+            lock.unlock()
+            return 0
+        config.save_config(cfg)
 
     mixer = MixerApp(app, cfg, log_path)
     server = listen_for_show_requests(mixer.show_window)

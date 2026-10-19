@@ -46,3 +46,20 @@ def pump(app, seconds: float) -> None:
     while time.monotonic() < end:
         app.processEvents()
         time.sleep(0.01)
+
+
+@pytest.fixture
+def mixer(qapp, cfg):
+    """Console en démo (Voicemeeter et REAPER simulés), affichée."""
+    from core.app_volume import DemoAppVolumes
+    from core.demo import DemoProcesses, DemoReaper, DemoVoicemeeter
+    from ui.main_window import MainWindow
+
+    vm, reaper = DemoVoicemeeter(cfg), DemoReaper(cfg)
+    window = MainWindow(cfg=cfg, vm=vm, reaper=reaper, processes=DemoProcesses(), persist=False,
+                        apps=DemoAppVolumes())
+    window.resize(1920, 1040)
+    window.show()
+    pump(qapp, 0.2)
+    yield window, vm, reaper
+    window.close()

@@ -16,6 +16,7 @@ from ui import styles
 
 PILL_HEIGHT = 16
 PADDING_X = 7
+SLOW_PLUGIN_MS = 3.0     # au-delà, point ambre : plugin qui retarde nettement le son
 
 
 class FxPill(QWidget):
@@ -31,6 +32,7 @@ class FxPill(QWidget):
         self._open = is_open
         self._hover = False
         self._pressed = False
+        self._latency_ms: float | None = None
         self.setFixedHeight(PILL_HEIGHT)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -42,9 +44,20 @@ class FxPill(QWidget):
             self._refresh_tooltip()
             self.update()
 
+    def set_latency(self, ms: float | None) -> None:
+        """Latence propre du plugin (compensation), None si inconnue."""
+        if ms != self._latency_ms:
+            self._latency_ms = ms
+            self._refresh_tooltip()
+            self.update()
+
     @property
     def name(self) -> str:
         return self._name
+
+    @property
+    def slow(self) -> bool:
+        return self._latency_ms is not None and self._latency_ms >= SLOW_PLUGIN_MS
 
     # -------------------------------------------------------------- dessin
     def paintEvent(self, _event) -> None:  # noqa: N802
@@ -67,10 +80,14 @@ class FxPill(QWidget):
         f.setStrikeOut(not self._enabled)
         p.setFont(f)
         p.setPen(QColor(styles.TEXT_PRIMARY if self._enabled else styles.TEXT_MUTED))
-        text_rect = rect.adjusted(PADDING_X, 0, -PADDING_X, 0)
+        text_rect = rect.adjusted(PADDING_X, 0, -PADDING_X - (8 if self.slow else 0), 0)
         text = p.fontMetrics().elidedText(self._name, Qt.TextElideMode.ElideRight,
                                           int(text_rect.width()))
         p.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, text)
+        if self.slow:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(styles.SOLO_ON if self._enabled else styles.TEXT_MUTED))
+            p.drawEllipse(rect.right() - 8.5, rect.center().y() - 2.5, 5, 5)
 
     # ------------------------------------------------------------ interaction
     def enterEvent(self, _event) -> None:  # noqa: N802
@@ -106,4 +123,9 @@ class FxPill(QWidget):
 
     def _refresh_tooltip(self) -> None:
         state = "actif" if self._enabled else "désactivé (bypass)"
-        self.setToolTip(f"{self._name} — {state}\nClic : interface · Clic droit : options")
+        latency = ""
+        if self._latency_ms is not None:
+            latency = f"\nLatence : {self._latency_ms:.1f} ms"
+            if self.slow:
+                latency += " (retarde nettement la voix : préfère un mode « zéro latence »)"
+        self.setToolTip(f"{self._name} — {state}{latency}\nClic : interface · Clic droit : options")

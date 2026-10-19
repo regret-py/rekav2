@@ -52,6 +52,8 @@ class FxBadge(QAbstractButton):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._tips = ("Effets actifs — clic pour tout bypasser",
+                      "Effets en bypass — clic pour les réactiver")
         self.setCheckable(True)
         self.setChecked(True)
         self.setFixedSize(28, 28)
@@ -59,9 +61,12 @@ class FxBadge(QAbstractButton):
         self.toggled.connect(self._refresh_tooltip)
         self._refresh_tooltip(True)
 
+    def set_tooltips(self, on: str, off: str) -> None:
+        self._tips = (on, off)
+        self._refresh_tooltip(self.isChecked())
+
     def _refresh_tooltip(self, checked: bool) -> None:
-        self.setToolTip("Effets actifs — clic pour tout bypasser" if checked
-                        else "Effets en bypass — clic pour les réactiver")
+        self.setToolTip(self._tips[0] if checked else self._tips[1])
 
     def paintEvent(self, _event) -> None:  # noqa: N802
         p = QPainter(self)
@@ -171,8 +176,23 @@ class FxList(QWidget):
         self._pills: list[FxPill] = []
         self._hover_slot = -1
         self._enabled = True
+        self._add_label = "+ Ajouter un effet"
+        self._hint = ""
         self.setMouseTracking(True)
         self._resize_for(0)
+
+    def set_texts(self, add_label: str, hint: str) -> None:
+        """Texte de l'emplacement libre au survol, et de la zone vide."""
+        if (add_label, hint) != (self._add_label, self._hint):
+            self._add_label, self._hint = add_label, hint
+            self.update()
+
+    def set_hint(self, hint: str) -> None:
+        self.set_texts(self._add_label, hint)
+
+    def set_latencies(self, latencies: list[float | None]) -> None:
+        for pill, ms in zip(self._pills, latencies):
+            pill.set_latency(ms)
 
     def set_effects(self, effects: list[tuple[str, bool, bool]]) -> None:
         """effects = [(nom affiché, actif, interface ouverte), …]"""
@@ -248,7 +268,11 @@ class FxList(QWidget):
                 p.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), 5, 5)
                 p.setPen(QColor(styles.GREEN_NEON))
                 p.setFont(styles.font(10, QFont.Weight.Medium))
-                p.drawText(rect, Qt.AlignmentFlag.AlignCenter, "+ Ajouter un effet")
+                p.drawText(rect, Qt.AlignmentFlag.AlignCenter, self._add_label)
+            elif slot == 0 and not self._pills and self._hint:
+                p.setPen(QColor(styles.TEXT_MUTED))
+                p.setFont(styles.font(10, QFont.Weight.Medium))
+                p.drawText(rect, Qt.AlignmentFlag.AlignCenter, self._hint)
             else:
                 p.setPen(QPen(styles.color(styles.TEXT_MUTED, 0.55), 1.2))
                 cx, cy = rect.center().x(), rect.center().y()
@@ -391,6 +415,10 @@ class StripWidget(QFrame):
         title.setObjectName("sectionTitle")
         header.addWidget(title)
         header.addStretch(1)
+        self.latency_label = QLabel()
+        self.latency_label.setObjectName("latencyLabel")
+        self.latency_label.hide()
+        header.addWidget(self.latency_label)
         self.fx_badge = FxBadge()
         self.fx_badge.clicked.connect(lambda: self.chainToggled.emit(self.index, self.fx_badge.isChecked()))
         header.addWidget(self.fx_badge)
@@ -522,6 +550,30 @@ class StripWidget(QFrame):
         une piste, ou l'app a le droit d'en créer une)."""
         self.fx_list.set_available(available and can_add)
         self.fx_badge.setEnabled(available and self._track is not None)
+
+    def configure_effects(self, add_label: str, hint: str, manages_fx: bool,
+                          chain_on_tip: str, chain_off_tip: str) -> None:
+        """Textes de la zone d'effets selon le moteur (REAPER, FL Studio, APO…)."""
+        self.fx_list.set_texts(add_label, hint)
+        self.fx_badge.set_tooltips(chain_on_tip, chain_off_tip)
+
+    def set_fx_hint(self, hint: str) -> None:
+        self.fx_list.set_hint(hint)
+
+    def set_latency(self, ms: float | None, per_fx: list[float | None] | None = None) -> None:
+        """Latence des plugins actifs de la strip (None : inconnue)."""
+        if per_fx is not None:
+            self.fx_list.set_latencies(per_fx)
+        if ms is None or ms < 0.05:
+            self.latency_label.hide()
+            return
+        self.latency_label.setText(f"+{ms:.1f} ms")
+        self.latency_label.setProperty("slow", ms >= 3.0)
+        self.latency_label.style().unpolish(self.latency_label)
+        self.latency_label.style().polish(self.latency_label)
+        self.latency_label.setToolTip("Délai ajouté à la voix par les plugins actifs de cette strip "
+                                      "(en plus des tampons audio)")
+        self.latency_label.show()
 
     def fx_name(self, fx_index: int) -> str:
         if self._track is not None and 0 <= fx_index < len(self._track.fx):

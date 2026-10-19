@@ -31,22 +31,6 @@ def drag(widget, start, end, steps=10):
     send(widget, QEvent.Type.MouseButtonRelease, end, LEFT, NONE)
 
 
-@pytest.fixture
-def mixer(qapp, cfg):
-    from core.app_volume import DemoAppVolumes
-    from core.demo import DemoProcesses, DemoReaper, DemoVoicemeeter
-    from ui.main_window import MainWindow
-
-    vm, reaper = DemoVoicemeeter(cfg), DemoReaper(cfg)
-    window = MainWindow(cfg=cfg, vm=vm, reaper=reaper, processes=DemoProcesses(), persist=False,
-                        apps=DemoAppVolumes())
-    window.resize(1920, 1040)
-    window.show()
-    pump(qapp, 0.2)
-    yield window, vm, reaper
-    window.close()
-
-
 def test_routing_knob_click_and_drag(qapp, mixer):
     window, vm, _ = mixer
     knob = window.strips[1].knobs[1]

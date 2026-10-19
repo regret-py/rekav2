@@ -167,6 +167,26 @@ REAPER_SPEC = AppSpec(
 )
 
 
+FLSTUDIO_SPEC = AppSpec(
+    key="flstudio",
+    name="FL Studio",
+    exe_names=("FL64.exe", "FL.exe"),
+    # Un dossier par version (« FL Studio 21 », « FL Studio 2024 ») : le plus récent d'abord
+    install_dirs=(
+        r"%ProgramW6432%\Image-Line\FL Studio*",
+        r"%ProgramFiles%\Image-Line\FL Studio*",
+        r"%ProgramFiles(x86)%\Image-Line\FL Studio*",
+    ),
+    registry=(),
+    window_classes=("TFruityLoopsMainForm",),
+    window_title="fl studio",
+    download_url="https://www.image-line.com/fl-studio-download/",
+    attach_foreign=True,
+)
+
+APP_SPECS = {"reaper": REAPER_SPEC, "flstudio": FLSTUDIO_SPEC}
+
+
 # --------------------------------------------------------------------------- #
 # Erreurs
 # --------------------------------------------------------------------------- #
@@ -335,17 +355,33 @@ def _executable_candidates(spec: AppSpec, configured: str | None) -> Iterator[tu
         if folder is not None:
             yield from (("registre", folder / exe) for exe in spec.exe_names)
 
-    # 4. Dossiers d'installation standards
+    # 4. Dossiers d'installation standards (« * » : un dossier par version, le plus récent d'abord)
     for folder in spec.install_dirs:
         base = config.resolve_path(folder)
-        if base is not None:
-            yield from (("dossier standard", base / exe) for exe in spec.exe_names)
+        if base is None:
+            continue
+        if "*" in base.name:
+            try:
+                matches = sorted(base.parent.glob(base.name), key=_mtime, reverse=True)
+            except OSError:
+                matches = []
+        else:
+            matches = [base]
+        for match in matches:
+            yield from (("dossier standard", match / exe) for exe in spec.exe_names)
 
     # 5. PATH système
     for exe in spec.exe_names:
         found = shutil.which(exe)
         if found:
             yield "PATH", Path(found)
+
+
+def _mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 def _registry_install_dir(hive: str, key: str, value: str) -> Path | None:
@@ -493,6 +529,12 @@ class ProcessManager:
         args = ["-nosplash"] + ([str(path)] if path else [])
         self._start(REAPER_SPEC, args=args, prepare=prepare)
 
+    def start_flstudio(self) -> None:
+        """Lance FL Studio (masqué), sur le projet flstudio.project s'il existe."""
+        project = config.resolve_path(self._section("flstudio").get("project"))
+        args = [str(project)] if project is not None and project.is_file() else []
+        self._start(FLSTUDIO_SPEC, args=args)
+
     def executable(self, key: str) -> Path | None:
         """Chemin de l'exécutable connu pour un moteur (après un start_*)."""
         path = config.resolve_path(self._section(key).get("path"))
@@ -546,6 +588,25 @@ class ProcessManager:
         if IS_WINDOWS:
             _set_windows_visible(managed.main_windows(), visible)
         log.info("%s : fenêtre %s.", managed.spec.name, "affichée" if visible else "masquée")
+
+    def bring_to_front(self, key: str) -> bool:
+        """Affiche la fenêtre principale d'un moteur et la met au premier plan
+        (FL Studio : ses effets se règlent dans sa propre fenêtre)."""
+        managed = self._get(key)
+        if managed is None or not managed.is_alive():
+            return False
+        self.set_window_visible(key, True)
+        if not IS_WINDOWS:
+            return True
+        for hwnd in managed.main_windows():
+            try:
+                if win32gui.IsIconic(hwnd):
+                    win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                win32gui.SetForegroundWindow(hwnd)
+                return True
+            except pywintypes.error as exc:
+                log.debug("Mise au premier plan impossible : %s", exc)
+        return True
 
     def stop(self, key: str) -> None:
         """Arrête un moteur s'il est à nous (et terminate_on_exit), sinon le

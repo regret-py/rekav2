@@ -347,6 +347,24 @@ class VoicemeeterController(QObject):
     def set_label(self, strip: int, text: str) -> None:
         self._queue(f"Strip[{self._strips[strip]}].Label", text[:30])
 
+    def set_buffering(self, samples: int) -> None:
+        """Tampon audio de Voicemeeter (WDM et Kernel Streaming), en échantillons :
+        plus petit = moins de délai sur la voix, plus de CPU. Le mode « swift »
+        (WDM) est activé sous 512. Voicemeeter redémarre son moteur audio."""
+        samples = int(samples)
+        for driver in ("wdm", "ks"):
+            self._queue(f"Option.buffer.{driver}", float(samples))
+        self._queue("Option.mode.swift", 1.0 if samples < 512 else 0.0)
+        self._queue("Command.Restart", 1.0)
+        log.info("Tampon de Voicemeeter : %d échantillons (moteur audio redémarré).", samples)
+
+    def set_wdm_exclusive(self, exclusive: bool) -> None:
+        """Mode exclusif des entrées WDM. Désactivé, Windows (donc Equalizer APO)
+        traite le son du micro avant Voicemeeter."""
+        self._queue("Option.mode.exclusif", 1.0 if exclusive else 0.0)
+        self._queue("Command.Restart", 1.0)
+        log.info("Entrées WDM de Voicemeeter en mode %s.", "exclusif" if exclusive else "partagé")
+
     def set_headphone_gain(self, db: float) -> None:
         self._queue(f"Bus[{self._headphone_bus}].Gain", _clamp_gain(db))
 

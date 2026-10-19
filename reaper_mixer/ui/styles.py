@@ -338,6 +338,14 @@ QLabel#knobLabel {{
     font-size: 10px;
     font-weight: 500;
 }}
+QLabel#latencyLabel {{
+    color: {TEXT_SECONDARY};
+    font-size: 10px;
+    font-weight: 600;
+}}
+QLabel#latencyLabel[slow="true"] {{
+    color: {SOLO_ON};
+}}
 QLabel#faderValue {{
     color: {TEXT_PRIMARY};
     font-size: 11px;
@@ -422,6 +430,10 @@ QPushButton#soloButton:checked:hover {{
 }}
 
 /* ---- zone d'effets ---- */
+QScrollArea#tabScroll, QScrollArea#tabScroll > QWidget > QWidget {{
+    background: transparent;
+    border: none;
+}}
 QScrollArea#fxScroll, QScrollArea#fxScroll > QWidget > QWidget {{
     background: transparent;
     border: none;

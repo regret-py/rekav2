@@ -46,7 +46,12 @@ function reaper.CreateTrackSend(tr, dest) assert(dest == nil); tr.sends[#tr.send
 function reaper.SetTrackSendInfo_Value(tr, cat, idx, key, v) assert(cat == 1); tr.sends[idx + 1][key] = v; return true end
 function reaper.TrackFX_AddByName(tr, name)
   for _, p in ipairs(installed) do
-    if p[1] == name then tr.fx[#tr.fx + 1] = { name = name, enabled = true, open = false }; return #tr.fx - 1 end
+    if p[1] == name then
+      -- ReaLimit : 2,5 ms d'anticipation à 48 kHz (120 échantillons)
+      local pdc = name:find("ReaLimit") and 120 or 0
+      tr.fx[#tr.fx + 1] = { name = name, enabled = true, open = false, pdc = pdc }
+      return #tr.fx - 1
+    end
   end
   return -1
 end
@@ -71,6 +76,11 @@ function reaper.GetAppVersion() return "7.22/linux-test" end
 local device = { MODE = "ASIO", IDENT_IN = "Voicemeeter Potato Insert Virtual ASIO",
                  IDENT_OUT = "Voicemeeter Potato Insert Virtual ASIO", SRATE = "48000", BSIZE = "256" }
 function reaper.GetAudioDeviceInfo(key) return true, device[key] end
+function reaper.TrackFX_GetNamedConfigParm(tr, i, key)
+  if key == "pdc" then return true, tostring(tr.fx[i + 1].pdc or 0) end
+  return false, ""
+end
+function reaper.GetInputOutputLatency() return 256, 288 end
 function reaper.EnumInstalledFX(i)
   local p = installed[i + 1]
   if not p then return false end

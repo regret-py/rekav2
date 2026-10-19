@@ -16,7 +16,8 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from core.reaper_ctrl import AudioDevice, FxInfo, TrackInfo
+from core.effects import HOST_REAPER, EffectsHost, samples_to_ms
+from core.reaper_ctrl import AudioDevice, FxInfo, TrackInfo, track_latency_samples
 from core.voicemeeter_ctrl import (DEFAULT_ROUTING, SILENCE_DB, MixerLevels, MixerParams,
                                    StripParams, clamp_pad, edition, pad_modes, strip_map)
 
@@ -30,6 +31,11 @@ DEMO_PLUGINS = [
     ("VST3: Pro-L 2 (FabFilter)", ""), ("VST: ReaEQ (Cockos)", ""), ("VST: ReaComp (Cockos)", ""),
     ("VST: ReaLimit (Cockos)", ""), ("VST: ReaGate (Cockos)", ""), ("JS: Volume Adjustment", ""),
 ]
+DEMO_LATENCY = {"Pro-MB": 0, "ReaLimit": 120, "Pro-L 2": 240}   # PDC simulée (échantillons)
+
+
+def _demo_latency(name: str) -> int:
+    return next((samples for key, samples in DEMO_LATENCY.items() if key in name), 0)
 
 
 class DemoVoicemeeter(QObject):
@@ -117,6 +123,12 @@ class DemoVoicemeeter(QObject):
                      for key, px, py in self._strips[strip].pads)
         self._update(strip, pads=pads)
 
+    def set_buffering(self, samples: int) -> None:
+        self.buffering = int(samples)
+
+    def set_wdm_exclusive(self, exclusive: bool) -> None:
+        self.wdm_exclusive = bool(exclusive)
+
     def set_headphone_gain(self, db: float) -> None:
         self._headphone = db
         self._emit_params()
@@ -150,21 +162,26 @@ class DemoVoicemeeter(QObject):
         self.levels_changed.emit(self.levels_at(time.monotonic() - self._t0))
 
 
-class DemoReaper(QObject):
-    connection_changed = Signal(bool)
-    tracks_changed = Signal(object)
-    device_changed = Signal(object)
-    project_changed = Signal(str)
-    installed_fx_ready = Signal(object)
-    command_failed = Signal(str)
+class DemoReaper(EffectsHost):
+    kind = HOST_REAPER
+    process_key = "reaper"
+    manages_fx = True
+    has_projects = True
+    has_audio_device = True
+    # Attributs simples (et non les propriétés de EffectsHost) : modifiables en démo
+    device = None
+    is_connected = True
+    installed_fx = None
+    project_path = ""
 
     def __init__(self, cfg: dict, parent: QObject | None = None) -> None:
-        super().__init__(parent)
+        super().__init__(cfg, parent)
         names = cfg.get("ui", {}).get("strip_names", [])
         count = len(strip_map(cfg))
         self._tracks = [
             TrackInfo(names[i] if i < len(names) else f"Strip {i + 1}", i != 0,
-                      tuple(FxInfo(n, True, False) for n in DEMO_FX.get(i, [])), index=i)
+                      tuple(FxInfo(n, True, False, _demo_latency(n)) for n in DEMO_FX.get(i, [])),
+                      index=i)
             for i in range(count)
         ]
         self.device = AudioDevice("ASIO", "Voicemeeter Insert Virtual ASIO",
@@ -198,8 +215,29 @@ class DemoReaper(QObject):
     def rename_track(self, strip: int, name: str) -> None:
         self._set(strip, name=name)
 
+    def insert_strips(self, tracks: list, connected: bool) -> set[int]:
+        if not connected or self.device is None or not self.device.is_voicemeeter_insert:
+            return set()
+        return {i for i, track in enumerate(tracks) if track is not None and track.processes_live}
+
+    def strip_latency_ms(self, strip: int) -> float | None:
+        if not 0 <= strip < len(self._tracks):
+            return None
+        return samples_to_ms(track_latency_samples(self._tracks[strip]), 48000)
+
+    def fx_latency_ms(self, strip: int, fx_index: int) -> float | None:
+        fx = self._tracks[strip].fx if 0 <= strip < len(self._tracks) else ()
+        if not 0 <= fx_index < len(fx) or fx[fx_index].latency < 0:
+            return None
+        return samples_to_ms(fx[fx_index].latency, 48000)
+
+    def latency_report(self) -> str:
+        worst = max(self.strip_latency_ms(i) or 0.0 for i in range(len(self._tracks)))
+        text = "Aller-retour par REAPER : 10.7 ms (2 × 256 échantillons à 48000 Hz)"
+        return text + (f", plus {worst:.1f} ms de plugins." if worst >= 0.05 else ".")
+
     def add_fx(self, strip: int, fx_name: str) -> None:
-        self._set(strip, fx=self._tracks[strip].fx + (FxInfo(fx_name, True, False),))
+        self._set(strip, fx=self._tracks[strip].fx + (FxInfo(fx_name, True, False, _demo_latency(fx_name)),))
 
     def remove_fx(self, strip: int, fx_index: int) -> None:
         fx = list(self._tracks[strip].fx)
@@ -242,6 +280,12 @@ class DemoProcesses:
 
     def focus_window(self, key: str, title_contains: str) -> bool:
         return False
+
+    def bring_to_front(self, key: str) -> bool:
+        return False
+
+    def is_running(self, key: str) -> bool:
+        return True
 
     def executable(self, key: str) -> None:
         return None
