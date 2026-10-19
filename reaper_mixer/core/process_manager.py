@@ -570,12 +570,14 @@ class ProcessManager:
 
     def will_terminate(self, key: str) -> bool:
         """True si shutdown() arrêtera ce processus : les contrôleurs peuvent
-        alors demander un arrêt propre au moteur avant (sauvegarde, etc.)."""
+        alors demander un arrêt propre au moteur avant (sauvegarde, etc.).
+        FL Studio reste ouvert par défaut : son projet n'est pas sauvegardé
+        par REKA, une fermeture forcée perdrait les réglages des effets."""
         managed = self._get(key)
         return bool(
             managed is not None
             and managed.launched_by_us
-            and self._section(key).get("terminate_on_exit", True)
+            and self._section(key).get("terminate_on_exit", key != "flstudio")
         )
 
     def set_window_visible(self, key: str, visible: bool) -> None:
@@ -779,6 +781,10 @@ class ProcessManager:
         name = managed.spec.name
         timeout = float(self._section(managed.spec.key).get(
             "close_timeout_s", DEFAULT_CLOSE_TIMEOUT_S))
+        if managed.spec.key == "flstudio" and IS_WINDOWS:
+            # FL Studio peut demander d'enregistrer le projet : fenêtre visible
+            managed.keep_hidden = False
+            _set_windows_visible(managed.main_windows(), True)
         try:
             if IS_WINDOWS:
                 for hwnd in managed.main_windows():

@@ -53,8 +53,8 @@
     "project": "",
     "inserts": [],
     "window_timeout_s": 60,
-    "close_timeout_s": 10,
-    "terminate_on_exit": true
+    "close_timeout_s": 60,
+    "terminate_on_exit": false
   },
   "apo": {
     "config_dir": "",

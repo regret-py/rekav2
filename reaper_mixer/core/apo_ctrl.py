@@ -445,7 +445,8 @@ class ApoController(EffectsHost):
         self._changed()
 
     def rename_track(self, strip: int, name: str) -> None:
-        self._write()          # le nom de la strip figure en commentaire
+        if self._config_dir is not None:
+            self._write()      # le nom de la strip figure en commentaire
 
     def toggle_fx_ui(self, strip: int, fx_index: int) -> None:
         self.show_app()

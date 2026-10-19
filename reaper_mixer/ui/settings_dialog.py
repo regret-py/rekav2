@@ -400,7 +400,11 @@ class SettingsDialog(QDialog):
         host_section = self._running_host if self._running_host in (HOST_REAPER, HOST_FLSTUDIO) \
             else HOST_REAPER
         self.close_reaper = QCheckBox(f"Fermer {HOSTS[host_section].label} en quittant")
-        self.close_reaper.setChecked(bool(self._cfg.get(host_section, {}).get("terminate_on_exit", True)))
+        self.close_reaper.setChecked(bool(self._cfg.get(host_section, {}).get(
+            "terminate_on_exit", host_section != HOST_FLSTUDIO)))
+        if host_section == HOST_FLSTUDIO:
+            self.close_reaper.setToolTip("Décoché : FL Studio reste ouvert et réapparaît quand tu "
+                                         "quittes REKA, pour enregistrer ton projet.")
         self.close_reaper.setVisible(self._running_host in (HOST_REAPER, HOST_FLSTUDIO))
         box.addWidget(self.close_reaper)
         self._close_section = host_section
