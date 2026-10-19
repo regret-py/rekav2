@@ -70,6 +70,12 @@ def test_bridge_end_to_end(qapp, cfg, tmp_path):
         ctrl.add_fx(0, "VST: ReaLimit (Cockos)")
         assert wait_for(lambda: [f.display_name for f in events["tracks"][-1][0].fx] ==
                         ["Pro-Q 4 (FabFilter)", "ReaLimit (Cockos)"])
+        # Latence : plugins (PDC) et carte son remontés par le pont
+        assert [f.latency for f in events["tracks"][-1][0].fx] == [0, 120]
+        assert ctrl.strip_latency_ms(0) == pytest.approx(2.5)
+        assert ctrl.insert_strips(events["tracks"][-1], True) == {0, 1, 4}
+        assert wait_for(lambda: "11.3 ms" in ctrl.latency_report()), ctrl.latency_report()
+        assert "2.5 ms de plugins sur « Microphone »" in ctrl.latency_report()
         # Strip sans piste (Appels, canal 10) : la piste est créée à l'ajout
         ctrl.add_fx(2, "JS: Volume Adjustment")
         assert wait_for(lambda: events["tracks"][-1][2] is not None

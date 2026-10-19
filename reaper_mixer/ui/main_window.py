@@ -25,6 +25,7 @@ from shiboken6 import delete as delete_now
 
 from core import config
 from core.app_volume import AppVolumeBackend, NullAppVolumes
+from core.effects import HOST_APO, HOST_NONE, HOST_REAPER
 from core.process_manager import is_blank_project, reaper_project
 from core.updater import UpdateChecker, UpdateInfo
 from core.voicemeeter_ctrl import DEFAULT_ROUTING, MixerLevels, MixerParams
@@ -239,7 +240,7 @@ class MainWindow(QMainWindow):
         self.master = MasterWidget()
         self.master.headphoneChanged.connect(vm.set_headphone_gain)
         self.master.settingsRequested.connect(self.open_settings)
-        self.master.projectRequested.connect(self.choose_project)
+        self.master.projectRequested.connect(self._on_project_button)
         self.master.minimizeRequested.connect(self.minimize)
         self.master.updateRequested.connect(self.open_update)
         layout.addWidget(self.master)
@@ -258,6 +259,9 @@ class MainWindow(QMainWindow):
         reaper.device_changed.connect(self._on_device)
         reaper.project_changed.connect(self._on_project)
         reaper.command_failed.connect(self.toast.show_message)
+        for strip in self.strips:
+            strip.configure_effects(reaper.add_label, reaper.strip_hint(strip.index),
+                                    reaper.manages_fx, *self._chain_tooltips())
 
         self._refresh_status()
         self._on_tracks(self._tracks)
@@ -324,15 +328,31 @@ class MainWindow(QMainWindow):
             strip.set_levels(strip_levels)
         self.master.set_levels(levels.master)
 
+    def _chain_tooltips(self) -> tuple[str, str]:
+        """Info-bulles du badge FX (chaîne active / en bypass) selon le moteur."""
+        if self._reaper.kind == "flstudio":
+            return ("Son envoyé à FL Studio (insert Voicemeeter) — clic pour le faire passer "
+                    "sans effets",
+                    "Son sans effets — clic pour l'envoyer à FL Studio (piste du mixer câblée "
+                    "sur l'insert de la strip)")
+        return ("Effets actifs — clic pour tout bypasser", "Effets en bypass — clic pour les réactiver")
+
     def _on_tracks(self, tracks: list) -> None:
-        """tracks : la piste REAPER de chaque strip (None si aucune piste du
-        projet n'écoute ses canaux)."""
+        """tracks : la piste (REAPER) ou la chaîne d'effets (autres moteurs) de
+        chaque strip ; None si aucune piste du projet n'écoute ses canaux."""
         self._tracks = list(tracks)
-        create = bool(self._cfg.get("reaper", {}).get("manage_routing", True))
+        host = self._reaper
+        create = (host.kind != HOST_REAPER
+                  or bool(self._cfg.get("reaper", {}).get("manage_routing", True)))
         for strip in self.strips:
             track = tracks[strip.index] if strip.index < len(tracks) else None
             strip.set_track(track)
-            strip.set_reaper_available(self._reaper_ok, track is not None or create)
+            strip.set_fx_hint(host.strip_hint(strip.index))
+            strip.set_reaper_available(self._reaper_ok and host.kind != HOST_NONE,
+                                       track is not None or create)
+            strip.set_latency(host.strip_latency_ms(strip.index),
+                              [host.fx_latency_ms(strip.index, i)
+                               for i in range(len(track.fx) if track is not None else 0)])
         self.update_inserts()
 
     def _on_vm_connection(self, ok: bool) -> None:
@@ -345,33 +365,41 @@ class MainWindow(QMainWindow):
         self._refresh_status()
 
     def _on_project(self, path: str) -> None:
+        host = self._reaper
+        if not host.has_projects:
+            # Pas de projet REKA : le bouton ouvre l'application du moteur
+            names = {"flstudio": ("FL Studio", "Clic : afficher FL Studio pour régler ses effets"),
+                     HOST_APO: ("Equalizer APO", "Clic : ouvrir l'éditeur d'Equalizer APO")}
+            name, tip = names.get(host.kind, ("Voicemeeter seul", "Aucun moteur d'effets"))
+            self.master.set_project(name, "", tip)
+            self.master.project.setVisible(host.kind != HOST_NONE)
+            return
         name = Path(path).stem if path else "…"
         if path and is_blank_project(path):
             name = "Projet vierge"
         self.master.set_project(name, path or "(en attente de REAPER)")
 
+    def _on_project_button(self) -> None:
+        if self._reaper.has_projects:
+            self.choose_project()
+        else:
+            self._reaper.show_app()
+
     def update_inserts(self) -> None:
-        """Insert Voicemeeter activé seulement pour les strips dont la piste
-        REAPER traite vraiment le son (armée, écoutée, avec une sortie) et
-        quand REAPER tourne sur le pilote de l'insert : sinon la strip serait
-        muette. Tout le reste passe sans effets."""
+        """Insert Voicemeeter activé seulement pour les strips dont le moteur
+        d'effets traite vraiment le son (REAPER : piste armée, écoutée, avec une
+        sortie, et carte son sur le pilote de l'insert ; FL Studio : badge FX
+        allumé) : sinon la strip serait muette. Tout le reste passe sans effets."""
         manage = bool(self._cfg.get("voicemeeter", {}).get("manage_insert", True))
-        device = self._reaper.device
-        ready = (manage and self._reaper_ok and device is not None
-                 and device.is_voicemeeter_insert)
-        strips = {i for i, track in enumerate(self._tracks)
-                  if ready and track is not None and track.processes_live}
+        strips = self._reaper.insert_strips(self._tracks, self._reaper_ok) if manage else set()
         self._vm.set_inserts(strips)
 
     def _refresh_status(self) -> None:
         if not self._vm_ok:
             self.master.set_status(False, "Voicemeeter déconnecté",
                                    "Voicemeeter ne répond plus : faders et routing sont figés.")
-        elif self._reaper_ok:
-            self.master.set_status(True, "REAPER connecté")
         else:
-            self.master.set_status(False, "REAPER déconnecté",
-                                   "REAPER ne répond plus : les effets ne sont plus modifiables.")
+            self.master.set_status(*self._reaper.status(self._reaper_ok))
 
     def _on_device(self, device) -> None:
         manage = bool(self._cfg.get("voicemeeter", {}).get("manage_insert", True))
@@ -464,18 +492,52 @@ class MainWindow(QMainWindow):
         self._save_config()
 
     def add_effect(self, index: int) -> None:
-        strip = self.strips[index]
-        exe = self._processes.executable("reaper") if self._processes is not None else None
-        dialog = VstDialog(strip.strip_name(), self._reaper, self._reaper.resource_path(exe),
-                           self._cfg.get("vst", {}).get("extra_dirs", []), self)
-        if dialog.exec() and dialog.selected is not None:
-            log.info("Ajout de %s sur %s", dialog.selected.add_name, strip.strip_name())
-            self._reaper.add_fx(index, dialog.selected.add_name)
+        strip, host = self.strips[index], self._reaper
+        if not host.manages_fx:
+            host.add_fx(index, "")              # FL Studio : sa fenêtre s'ouvre
+            return
+        extra_dirs = self._cfg.get("vst", {}).get("extra_dirs", [])
+        if host.kind == HOST_APO:
+            if not host.strip_device(index) and not self.choose_apo_device(index):
+                return
+            from core.apo_ctrl import default_vst2_dirs, scan_vst2
+            dialog = VstDialog(strip.strip_name(), None, None, extra_dirs, self,
+                               plugins=scan_vst2(default_vst2_dirs(extra_dirs)),
+                               browse_filter="Plugin VST2 64 bits (*.dll)",
+                               note="Equalizer APO charge les plugins VST2 64 bits (.dll).")
+        else:
+            exe = self._processes.executable("reaper") if self._processes is not None else None
+            dialog = VstDialog(strip.strip_name(), host, host.resource_path(exe), extra_dirs, self)
+        selected = dialog.selected if dialog.exec() else None
+        delete_now(dialog)        # sinon chaque ouverture garderait un dialogue (et sa liste) en mémoire
+        if selected is not None:
+            log.info("Ajout de %s sur %s", selected.add_name, strip.strip_name())
+            host.add_fx(index, selected.add_name)
+
+    def choose_apo_device(self, index: int) -> bool:
+        """Périphérique Windows d'une strip pour Equalizer APO (micro…)."""
+        from PySide6.QtWidgets import QInputDialog
+
+        host = self._reaper
+        names = [e.name for e in host.endpoints() if e.capture] + \
+                [e.name for e in host.endpoints() if not e.capture]
+        current = host.strip_device(index)
+        if current and current not in names:
+            names.insert(0, current)
+        name, ok = QInputDialog.getItem(
+            self, "Périphérique Windows",
+            f"Périphérique Windows de « {self.strips[index].strip_name()} »\n"
+            "(celui où Equalizer APO est installé, par exemple ton micro) :",
+            names, names.index(current) if current in names else 0, True)
+        if not ok or not name.strip():
+            return False
+        host.set_device(index, name.strip())
+        return True
 
     def _open_effect(self, index: int, fx_index: int) -> None:
         self._reaper.toggle_fx_ui(index, fx_index)
         name = self.strips[index].fx_name(fx_index)
-        if name and self._processes is not None:
+        if self._reaper.kind == HOST_REAPER and name and self._processes is not None:
             # L'interface du plugin s'ouvre dans REAPER (caché) : on la ramène devant
             QTimer.singleShot(FOCUS_PLUGIN_DELAY_MS, self,
                               lambda: self._processes.focus_window("reaper", name))
@@ -497,6 +559,7 @@ class MainWindow(QMainWindow):
         dialog.appearanceChanged.connect(self.apply_appearance)
         dialog.windowResetRequested.connect(self.reset_window_size)
         dialog.stripRenamed.connect(self.rename_strip)
+        dialog.latencyChanged.connect(lambda: self._on_tracks(self._tracks))
         # Redémarrage après la fermeture des réglages (pas depuis leur boucle modale)
         restart = []
         dialog.restartRequested.connect(lambda: restart.append(True))
@@ -667,10 +730,12 @@ class MainWindow(QMainWindow):
         """Choix du projet REAPER ; il est ouvert tout de suite, sans redémarrer."""
         session_cfg = running_config(self._cfg, self._vm)
         dialog = ProjectDialog(session_cfg, current=self._reaper.project_path, parent=self)
-        if not dialog.exec():
+        accepted, selected = bool(dialog.exec()), dialog.selected
+        delete_now(dialog)
+        if not accepted:
             return
         self._save_config()
-        path = reaper_project(session_cfg, dialog.selected)
+        path = reaper_project(session_cfg, selected)
         if path is None:
             self.toast.show_message("Projet introuvable.")
             return

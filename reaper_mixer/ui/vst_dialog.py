@@ -3,17 +3,20 @@ Dialogue d'ajout d'un plugin sur un strip : recherche, filtre par type,
 double-clic ou « Ajouter » pour l'insérer à la fin de la chaîne.
 
 La liste vient de REAPER (pont Lua) quand il est connecté, sinon du cache de
-scan de REAPER et des dossiers VST3 (voir core/vst_scanner.py).
+scan de REAPER et des dossiers VST3 (voir core/vst_scanner.py). Pour Equalizer
+APO, la liste (plugins VST2) est donnée toute faite, avec « Parcourir… ».
 """
 
 from __future__ import annotations
 
 import unicodedata
 
+from pathlib import Path
+
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel,
-                               QLineEdit, QListWidget, QListWidgetItem, QPushButton, QVBoxLayout,
-                               QWidget)
+from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFileDialog, QHBoxLayout,
+                               QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton,
+                               QVBoxLayout, QWidget)
 
 from core import vst_scanner
 from core.vst_scanner import PluginInfo
@@ -30,8 +33,12 @@ def _fold(text: str) -> str:
 
 class VstDialog(QDialog):
     def __init__(self, strip_name: str, reaper, resource_path, extra_dirs: list[str] | None,
-                 parent: QWidget | None = None) -> None:
+                 parent: QWidget | None = None, plugins: list[PluginInfo] | None = None,
+                 browse_filter: str | None = None, note: str = "") -> None:
         super().__init__(parent)
+        self._given = plugins
+        self._browse_filter = browse_filter
+        self._note = note
         self.setWindowTitle(f"Ajouter un effet — {strip_name}")
         self.resize(460, 560)
         self._reaper = reaper
@@ -70,6 +77,10 @@ class VstDialog(QDialog):
         layout.addWidget(self.status)
 
         buttons = QDialogButtonBox()
+        if browse_filter:
+            browse = buttons.addButton("Parcourir…", QDialogButtonBox.ButtonRole.ActionRole)
+            browse.setAutoDefault(False)
+            browse.clicked.connect(self._browse)
         self.add_button = QPushButton("Ajouter")
         self.add_button.setObjectName("primary")
         self.add_button.setDefault(True)
@@ -85,6 +96,12 @@ class VstDialog(QDialog):
 
     # ---------------------------------------------------------- chargement
     def _load(self) -> None:
+        if self._given is not None:
+            self._set_plugins(list(self._given))
+            if self._note:
+                self.status.setText(f"{len(self._given)} plugins trouvés. {self._note} "
+                                    "« Parcourir… » pour en choisir un ailleurs.")
+            return
         cached = self._reaper.installed_fx if self._reaper is not None else None
         if cached:
             self._set_plugins(vst_scanner.collect_plugins(cached, None))
@@ -148,6 +165,21 @@ class VstDialog(QDialog):
 
     def _update_buttons(self) -> None:
         self.add_button.setEnabled(self.list.currentItem() is not None)
+
+    def done(self, result: int) -> None:
+        # Fermé avant la réponse de REAPER : plus rien ne doit arriver ici
+        if self._reaper is not None and not self._plugins:
+            try:
+                self._reaper.installed_fx_ready.disconnect(self._on_reaper_list)
+            except (RuntimeError, TypeError):
+                pass
+        super().done(result)
+
+    def _browse(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Choisir un plugin", "", self._browse_filter or "")
+        if path:
+            self.selected = PluginInfo(Path(path).stem, path, "VST2", Path(path).parent.name)
+            self.accept()
 
     def _accept(self) -> None:
         item = self.list.currentItem()

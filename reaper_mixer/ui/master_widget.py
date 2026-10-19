@@ -172,9 +172,9 @@ class ProjectButton(QAbstractButton):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
-    def set_project(self, name: str, path: str) -> None:
+    def set_project(self, name: str, path: str, tooltip: str | None = None) -> None:
         self._name = name
-        self.setToolTip(f"Projet REAPER ouvert :\n{path}\n\nClic : changer de projet")
+        self.setToolTip(tooltip or f"Projet REAPER ouvert :\n{path}\n\nClic : changer de projet")
         self.update()
 
     def paintEvent(self, _event) -> None:  # noqa: N802
@@ -337,8 +337,8 @@ class MasterWidget(QFrame):
     def set_status(self, ok: bool, text: str, detail: str = "") -> None:
         self.badge.set_status(ok, text, detail)
 
-    def set_project(self, name: str, path: str) -> None:
-        self.project.set_project(name, path)
+    def set_project(self, name: str, path: str, tooltip: str | None = None) -> None:
+        self.project.set_project(name, path, tooltip)
 
     def set_update(self, version: str | None) -> None:
         """Affiche (ou cache) la pill de mise à jour."""

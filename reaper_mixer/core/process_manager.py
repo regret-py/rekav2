@@ -167,6 +167,26 @@ REAPER_SPEC = AppSpec(
 )
 
 
+FLSTUDIO_SPEC = AppSpec(
+    key="flstudio",
+    name="FL Studio",
+    exe_names=("FL64.exe", "FL.exe"),
+    # Un dossier par version (« FL Studio 21 », « FL Studio 2024 ») : le plus récent d'abord
+    install_dirs=(
+        r"%ProgramW6432%\Image-Line\FL Studio*",
+        r"%ProgramFiles%\Image-Line\FL Studio*",
+        r"%ProgramFiles(x86)%\Image-Line\FL Studio*",
+    ),
+    registry=(),
+    window_classes=("TFruityLoopsMainForm",),
+    window_title="fl studio",
+    download_url="https://www.image-line.com/fl-studio-download/",
+    attach_foreign=True,
+)
+
+APP_SPECS = {"reaper": REAPER_SPEC, "flstudio": FLSTUDIO_SPEC}
+
+
 # --------------------------------------------------------------------------- #
 # Erreurs
 # --------------------------------------------------------------------------- #
@@ -335,17 +355,33 @@ def _executable_candidates(spec: AppSpec, configured: str | None) -> Iterator[tu
         if folder is not None:
             yield from (("registre", folder / exe) for exe in spec.exe_names)
 
-    # 4. Dossiers d'installation standards
+    # 4. Dossiers d'installation standards (« * » : un dossier par version, le plus récent d'abord)
     for folder in spec.install_dirs:
         base = config.resolve_path(folder)
-        if base is not None:
-            yield from (("dossier standard", base / exe) for exe in spec.exe_names)
+        if base is None:
+            continue
+        if "*" in base.name:
+            try:
+                matches = sorted(base.parent.glob(base.name), key=_mtime, reverse=True)
+            except OSError:
+                matches = []
+        else:
+            matches = [base]
+        for match in matches:
+            yield from (("dossier standard", match / exe) for exe in spec.exe_names)
 
     # 5. PATH système
     for exe in spec.exe_names:
         found = shutil.which(exe)
         if found:
             yield "PATH", Path(found)
+
+
+def _mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 def _registry_install_dir(hive: str, key: str, value: str) -> Path | None:
@@ -482,16 +518,25 @@ class ProcessManager:
         self._start(voicemeeter_spec(kind), args=[])
 
     def start_reaper(self, prepare: Callable[[Path], dict[str, str]] | None = None,
-                     project: str | None = None) -> None:
+                     project: str | None = None) -> bool:
         """Lance REAPER sur un projet : `project` s'il est donné ("" = projet
         vierge de REKA), sinon le projet par défaut de la config.
 
         `prepare(exe)` est appelé avant le lancement avec le chemin de reaper.exe
         (installation du pont Lua) et renvoie des variables d'environnement à
-        transmettre au processus."""
+        transmettre au processus.
+
+        Renvoie True si un REAPER déjà lancé a été repris : il n'a pas reçu le
+        projet en argument, il faudra l'ouvrir une fois le pont connecté."""
         path = reaper_project(self._cfg, project)
         args = ["-nosplash"] + ([str(path)] if path else [])
-        self._start(REAPER_SPEC, args=args, prepare=prepare)
+        return self._start(REAPER_SPEC, args=args, prepare=prepare)
+
+    def start_flstudio(self) -> None:
+        """Lance FL Studio (masqué), sur le projet flstudio.project s'il existe."""
+        project = config.resolve_path(self._section("flstudio").get("project"))
+        args = [str(project)] if project is not None and project.is_file() else []
+        self._start(FLSTUDIO_SPEC, args=args)
 
     def executable(self, key: str) -> Path | None:
         """Chemin de l'exécutable connu pour un moteur (après un start_*)."""
@@ -528,12 +573,14 @@ class ProcessManager:
 
     def will_terminate(self, key: str) -> bool:
         """True si shutdown() arrêtera ce processus : les contrôleurs peuvent
-        alors demander un arrêt propre au moteur avant (sauvegarde, etc.)."""
+        alors demander un arrêt propre au moteur avant (sauvegarde, etc.).
+        FL Studio reste ouvert par défaut : son projet n'est pas sauvegardé
+        par REKA, une fermeture forcée perdrait les réglages des effets."""
         managed = self._get(key)
         return bool(
             managed is not None
             and managed.launched_by_us
-            and self._section(key).get("terminate_on_exit", True)
+            and self._section(key).get("terminate_on_exit", key != "flstudio")
         )
 
     def set_window_visible(self, key: str, visible: bool) -> None:
@@ -546,6 +593,25 @@ class ProcessManager:
         if IS_WINDOWS:
             _set_windows_visible(managed.main_windows(), visible)
         log.info("%s : fenêtre %s.", managed.spec.name, "affichée" if visible else "masquée")
+
+    def bring_to_front(self, key: str) -> bool:
+        """Affiche la fenêtre principale d'un moteur et la met au premier plan
+        (FL Studio : ses effets se règlent dans sa propre fenêtre)."""
+        managed = self._get(key)
+        if managed is None or not managed.is_alive():
+            return False
+        self.set_window_visible(key, True)
+        if not IS_WINDOWS:
+            return True
+        for hwnd in managed.main_windows():
+            try:
+                if win32gui.IsIconic(hwnd):
+                    win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                win32gui.SetForegroundWindow(hwnd)
+                return True
+            except pywintypes.error as exc:
+                log.debug("Mise au premier plan impossible : %s", exc)
+        return True
 
     def stop(self, key: str) -> None:
         """Arrête un moteur s'il est à nous (et terminate_on_exit), sinon le
@@ -581,12 +647,14 @@ class ProcessManager:
 
     # -------------------------------------------------------------- lancement
     def _start(self, spec: AppSpec, args: list[str],
-               prepare: Callable[[Path], dict[str, str]] | None = None) -> None:
+               prepare: Callable[[Path], dict[str, str]] | None = None) -> bool:
+        """Lance (ou reprend) une application ; True si une instance déjà
+        ouverte a été reprise (elle n'a pas reçu `args`)."""
         if self._abort.is_set():
             raise StartupAborted()
         current = self._get(spec.key)
         if current is not None and current.is_alive():
-            return
+            return True
 
         section = self._section(spec.key)
         exe = find_executable(spec, section.get("path"))
@@ -595,7 +663,8 @@ class ProcessManager:
         section["path"] = str(exe)  # mémorisé : plus de recherche au prochain lancement
         env = prepare(exe) if prepare is not None else {}
 
-        managed = self._adopt_running(spec) or self._launch(spec, exe, args, env)
+        adopted = self._adopt_running(spec)
+        managed = adopted or self._launch(spec, exe, args, env)
         with self._lock:
             self._procs[spec.key] = managed
         self._save_state()
@@ -603,6 +672,7 @@ class ProcessManager:
         timeout = float(section.get("window_timeout_s", DEFAULT_WINDOW_TIMEOUT_S))
         self._hide_when_ready(managed, timeout)
         self._ensure_watchdog()
+        return adopted is not None
 
     def _adopt_running(self, spec: AppSpec) -> ManagedProcess | None:
         """Reprend une instance déjà ouverte, si on en a le droit."""
@@ -718,6 +788,10 @@ class ProcessManager:
         name = managed.spec.name
         timeout = float(self._section(managed.spec.key).get(
             "close_timeout_s", DEFAULT_CLOSE_TIMEOUT_S))
+        if managed.spec.key == "flstudio" and IS_WINDOWS:
+            # FL Studio peut demander d'enregistrer le projet : fenêtre visible
+            managed.keep_hidden = False
+            _set_windows_visible(managed.main_windows(), True)
         try:
             if IS_WINDOWS:
                 for hwnd in managed.main_windows():

@@ -1,5 +1,9 @@
 {
   "log_level": "INFO",
+  "setup_done": false,
+  "effects": {
+    "host": "reaper"
+  },
   "voicemeeter": {
     "path": "",
     "kind": "potato",
@@ -21,7 +25,9 @@
     "login_retry_s": 5,
     "close_timeout_s": 8,
     "terminate_on_exit": true,
-    "app_devices": []
+    "app_devices": [],
+    "buffer": 0,
+    "wdm_shared": false
   },
   "update": {
     "check_on_start": true,
@@ -41,6 +47,18 @@
     "bridge_timeout_s": 90,
     "close_timeout_s": 10,
     "terminate_on_exit": true
+  },
+  "flstudio": {
+    "path": "",
+    "project": "",
+    "inserts": [],
+    "window_timeout_s": 60,
+    "close_timeout_s": 60,
+    "terminate_on_exit": false
+  },
+  "apo": {
+    "config_dir": "",
+    "strips": []
   },
   "vst": {
     "extra_dirs": []

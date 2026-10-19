@@ -325,6 +325,120 @@ def test_voicemeeter_controller(qapp, cfg, monkeypatch):
     assert ("Command.Shutdown", 1.0) in remote.sets and remote.logouts == 2
 
 
+class CachingRemote(FakeRemote):
+    """Comme voicemeeterlib : set() garde la valeur en cache, get() la renvoie
+    (et l'efface) au lieu de demander à Voicemeeter."""
+
+    def __init__(self):
+        super().__init__()
+        self.cache = {}
+        self.fail_sets = 0
+
+    def get(self, param, is_string=False):
+        if param in self.cache:
+            return self.cache.pop(param)
+        return super().get(param, is_string)
+
+    def set(self, param, value):
+        if self.fail_sets:
+            self.fail_sets -= 1
+            raise RuntimeError("Voicemeeter ne répond pas")
+        super().set(param, value)
+        self.cache[param] = value
+
+
+def _logged_in_vm(cfg, remote, monkeypatch):
+    from core.voicemeeter_ctrl import VoicemeeterController
+
+    remote.fail_login = 0
+    fake = types.ModuleType("voicemeeterlib")
+    fake.api = lambda kind, **kwargs: remote
+    monkeypatch.setitem(sys.modules, "voicemeeterlib", fake)
+    vm = VoicemeeterController(cfg)
+    vm.login()
+    return vm
+
+
+def test_voicemeeter_external_changes_not_hidden_by_cache(qapp, cfg, monkeypatch):
+    import core.voicemeeter_ctrl as vmc
+
+    monkeypatch.setattr(vmc, "ECHO_GUARD_S", 0.05)
+    remote = CachingRemote()
+    vm = _logged_in_vm(cfg, remote, monkeypatch)
+    params = []
+    vm.params_changed.connect(params.append)
+    vm.start_polling()
+    vm.set_mute(0, False)                 # REKA démute le micro…
+    pump(qapp, 0.3)
+    assert not params[-1].strips[0].mute
+    remote.params["Strip[0].Mute"] = 1.0  # … puis il est muté dans Voicemeeter (ou une macro)
+    remote.dirty = True
+    pump(qapp, 0.3)
+    assert params[-1].strips[0].mute, "valeur en cache de voicemeeterlib relue à la place de la vraie"
+    vm.close()
+
+
+def test_voicemeeter_failed_writes_and_inserts_are_retried(qapp, cfg, monkeypatch):
+    remote = CachingRemote()
+    vm = _logged_in_vm(cfg, remote, monkeypatch)
+    vm.set_gain(0, -3.0)
+    vm.set_gain(2, -9.0)
+    vm.set_inserts({0})
+    remote.fail_sets = 2                  # Voicemeeter tombe pendant l'envoi
+    with pytest.raises(RuntimeError):
+        vm._flush()
+    with pytest.raises(RuntimeError):
+        vm._flush()
+    assert not vm._inserts_saved          # insert non activé : pas noté comme fait
+    vm._flush()                           # Voicemeeter revient : rien n'a été perdu
+    assert remote.params["Strip[0].Gain"] == -3.0 and remote.params["Strip[5].Gain"] == -9.0
+    assert remote.params["patch.insert[0]"] == 1.0 and remote.params["patch.insert[1]"] == 1.0
+    # Voicemeeter relancé : ses inserts sont revenus à zéro, REKA les réactive
+    remote.params["patch.insert[0]"] = remote.params["patch.insert[1]"] = 0.0
+    vm._reassert_inserts()
+    assert remote.params["patch.insert[0]"] == 1.0 and remote.params["patch.insert[1]"] == 1.0
+    vm.close()
+    assert remote.params["patch.insert[0]"] == 0.0    # rendu à son état d'origine
+    assert remote.params["patch.insert[1]"] == 1.0    # il était déjà actif avant REKA
+
+
+def test_reaper_retry_rewrites_commands(qapp, cfg, tmp_path):
+    """« Réessayer » après la mort de REAPER : le thread de lecture du premier
+    essai doit réécrire commands.txt pour le nouveau REAPER."""
+    from pathlib import Path
+
+    from core.reaper_ctrl import ReaperController
+
+    cfg["reaper"]["resource_path"] = str(tmp_path / "res")
+    ctrl = ReaperController(cfg)
+    ctrl.prepare_launch(Path("reaper.exe"))
+    ctrl.start()
+    commands = ctrl.ipc_dir / "commands.txt"
+    try:
+        pump(qapp, 0.2)
+        assert commands.is_file()
+        ctrl.prepare_launch(Path("reaper.exe"))       # 2e essai : fichiers effacés
+        assert not commands.is_file()
+        pump(qapp, 0.3)
+        assert commands.is_file() and "ensure_name" in commands.read_text(encoding="utf-8")
+    finally:
+        ctrl.close(save_project=False)
+
+
+def test_unreadable_user_config_that_cannot_be_moved(cfg, appdata, monkeypatch):
+    from core import config
+
+    path = config.user_config_path()
+    path.write_text("{ cassé", encoding="utf-8")
+
+    def locked(*_args):
+        raise PermissionError("fichier verrouillé")
+
+    monkeypatch.setattr(config.os, "replace", locked)
+    loaded = config.load_config()                  # pas d'exception : défauts
+    assert loaded["voicemeeter"]["kind"] == "potato"
+
+
 def test_voicemeeter_controller_banana(qapp, cfg, monkeypatch):
     from core.voicemeeter_ctrl import VoicemeeterController
 

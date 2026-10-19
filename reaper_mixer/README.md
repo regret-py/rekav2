@@ -62,24 +62,66 @@ sur son insert (désactivable dans ⚙ → Options).
 
 | Élément | Action |
 |---|---|
-| Fader | glisser (Maj = fin), molette, double-clic = 0 dB |
+| Fader | glisser (Maj = fin), molette, double-clic = 0 dB ; de -60 à +12 dB, comme Voicemeeter |
 | Knobs Monitor / Mic Out / Discord / Obs | clic = envoi on/off vers A1 / B1 / B2 / A2, glisser = niveau d'envoi |
 | Intellipan (carré au petit cube rouge) | glisser le cube = régler, double-clic = neutre, clic sur le titre ou clic droit = mode |
 | Bouton Apps (strips virtuelles) | volume, mute et niveau de chaque application qui joue sur la strip |
 | Pill « Mise à jour » (Master) | apparaît quand une nouvelle version est en ligne ; clic pour l'installer |
 | Muet | coupe la strip |
-| Pill d'effet | clic = ouvrir/fermer l'interface du plugin, clic droit = bypass / supprimer |
-| Emplacement vide (« + ») | ajouter un effet (recherche dans les plugins connus de REAPER) |
-| Badge FX ⏻ | bypass de toute la chaîne d'effets de la strip |
-| Nom de la strip | double-clic pour renommer (renomme aussi la piste REAPER) |
+| Pill d'effet | clic = ouvrir/fermer l'interface du plugin, clic droit = bypass / supprimer ; point ambre = plugin qui retarde la voix |
+| Emplacement vide (« + ») | ajouter un effet (REAPER, Equalizer APO) ; FL Studio : l'afficher |
+| Badge FX ⏻ | bypass de toute la chaîne d'effets de la strip (FL Studio : envoi à l'insert) |
+| Nom de la strip | double-clic ou clic droit pour renommer (renomme aussi la piste REAPER) ; tous les noms : ⚙ → Canaux |
 | Knob Casque | volume du bus A1 (double-clic = 0 dB) |
-| Badge de connexion | vert = tout répond ; rouge = REAPER ou Voicemeeter ne répond plus |
-| Bouton Projet | projet REAPER ouvert ; clic pour en changer |
+| Badge de connexion | vert = tout répond ; rouge = le moteur d'effets ou Voicemeeter ne répond plus |
+| Bouton Projet | projet REAPER ouvert, clic pour en changer ; FL Studio / Equalizer APO : l'ouvrir |
 | Bouton – (Master) | réduire REKA (barre des tâches, ou zone de notification si activé) |
-| Bouton ⚙ (Master) | réglages : Général, Audio, Apparence, À propos |
+| Bouton ⚙ (Master) | réglages : Général, Canaux, Audio, Apparence, À propos |
 
 `REKA.exe --demo` ouvre la console avec des moteurs simulés (sans Voicemeeter ni REAPER)
-pour la découvrir.
+pour la découvrir ; `--demo --host flstudio` (ou `apo`, `none`) montre les autres moteurs
+d'effets.
+
+## Moteurs d'effets : REAPER, FL Studio, Equalizer APO ou aucun
+
+Au premier lancement, REKA affiche un **menu de sélection** : l'édition de Voicemeeter
+(Potato ou Banana) et l'application qui applique les effets aux strips. Chaque choix
+indique s'il est installé sur le PC et le délai qu'il ajoute à la voix. On le retrouve dans
+⚙ → **Général** (*Voicemeeter* / *Effets*, puis **Redémarrer REKA**), ou en lançant
+`REKA.exe --setup`.
+
+| Moteur | Effets | Délai ajouté |
+|---|---|---|
+| **REAPER** | VST2/VST3/CLAP gérés depuis REKA : ajout, bypass, interface, projets | 2 tampons ASIO (insert) + plugins |
+| **FL Studio** | réglés dans FL Studio (le « + » d'une strip l'affiche) | 2 tampons ASIO (insert) + plugins |
+| **Equalizer APO** | plugins VST2 64 bits gérés depuis REKA, appliqués par Windows | plugins seulement |
+| **Aucun** | Voicemeeter seul : volumes, routing, VU | aucun |
+
+- **FL Studio** : REKA le lance (masqué) sur le projet choisi dans ⚙ → Général et le ferme
+  en partant. Dans FL Studio, choisis *Voicemeeter Insert Virtual ASIO* (Options → Audio
+  settings), puis une piste du mixer par strip, entrée et sortie sur les canaux d'insert de
+  la strip (rappelés dans ⚙ → Audio). Le **badge FX** d'une strip envoie alors son son à
+  FL Studio : laisse-le éteint tant que la piste n'est pas câblée, sinon la strip est muette.
+- **Equalizer APO** : installe-le sur les périphériques Windows des strips (son
+  *Configurator*). Les entrées virtuelles ont leur périphérique (*Voicemeeter Input*, *AUX*,
+  *VAIO3*) ; pour le micro, choisis-le au premier ajout d'effet ou dans ⚙ → Audio, et coche
+  *Entrées WDM en mode partagé* (sinon Windows, donc APO, ne voit pas le son du micro).
+  REKA écrit `reka.txt` dans le dossier `config` d'Equalizer APO et ajoute une seule ligne
+  `Include: reka.txt` à `config.txt` : le reste de ta configuration n'est pas touché. Les
+  réglages des plugins faits dans l'éditeur d'Equalizer APO sont conservés.
+
+## Délai de la voix
+
+- Chaque strip affiche à côté de *Effets* le délai ajouté par ses plugins actifs
+  (**+2.5 ms**, en ambre au-delà de 3 ms). Un **point ambre** sur un plugin signale un
+  plugin à anticipation (limiteur, égaliseur en phase linéaire…) : sur le micro, préfère
+  son mode « zéro latence ».
+- ⚙ → **Audio** → *Délai de la voix* : délai total du moteur d'effets (tampons + plugins),
+  et **Tampon de Voicemeeter** : 512, 256 ou 128 échantillons (WDM et Kernel Streaming).
+  Plus petit = voix plus rapide (≈ 2,7 ms de moins par tranche de 128 à 48 kHz), mais plus
+  de CPU : si le son craque, remonte d'un cran.
+- Le moteur le plus rapide avec effets est **Equalizer APO** (pas d'aller-retour par
+  l'insert) ; sans effets, **Aucun**.
 
 ## Intellipan
 
@@ -142,7 +184,7 @@ Si oui, une pill **Mise à jour** apparaît dans le panneau Master :
 
 ## Voicemeeter Potato ou Banana
 
-⚙ → onglet **Général** → *Édition* : choisis **Potato** (8 entrées, 6 strips) ou
+⚙ → onglet **Général** → *Voicemeeter* : choisis **Potato** (8 entrées, 6 strips) ou
 **Banana** (5 entrées, 5 strips), puis **Redémarrer REKA**. REKA lance alors la bonne
 édition et ouvre un projet vierge adapté (`session-banana.rpp` pour Banana). Ferme l'autre
 édition de Voicemeeter si elle tourne encore. Sur Banana, les knobs d'envoi sont de simples
@@ -198,6 +240,7 @@ est installée, REKA propose de l'utiliser directement.
   background.*     image d'arrière-plan choisie
   processes.json   processus lancés par l'app (reprise après plantage)
   bridge\          échanges avec le pont Lua
+  apo-demo\        configuration Equalizer APO simulée (--demo --host apo)
 ```
 
 Les données de l'ancien dossier `%APPDATA%\REAPER Mixer` sont reprises automatiquement.

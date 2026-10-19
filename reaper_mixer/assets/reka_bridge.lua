@@ -242,6 +242,22 @@ local function device_line()
   return table.concat(fields, "\t")
 end
 
+-- Latence d'un plugin (compensation, en échantillons) ; -1 si REAPER ne la donne pas
+local function fx_latency(tr, i)
+  if not reaper.TrackFX_GetNamedConfigParm then return -1 end
+  local ok, has, value = pcall(reaper.TrackFX_GetNamedConfigParm, tr, i, "pdc")
+  if ok and has then return math.floor(tonumber(value) or -1) end
+  return -1
+end
+
+-- Latences d'entrée et de sortie de la carte son (échantillons)
+local function latency_line()
+  if not reaper.GetInputOutputLatency then return nil end
+  local ok, input, output = pcall(reaper.GetInputOutputLatency)
+  if not ok then return nil end
+  return "LATENCY\t" .. math.floor(tonumber(input) or 0) .. "\t" .. math.floor(tonumber(output) or 0)
+end
+
 local function build_state()
   state_n = state_n + 1
   local out = {
@@ -252,6 +268,7 @@ local function build_state()
     "PROJECT\t" .. escape(project_path()),
   }
   out[#out + 1] = device_line()
+  out[#out + 1] = latency_line()
   for t = 0, reaper.CountTracks(0) - 1 do
     local tr = reaper.GetTrack(0, t)
     local _, name = reaper.GetSetMediaTrackInfo_String(tr, "P_NAME", "", false)
@@ -271,6 +288,7 @@ local function build_state()
         "FX", t, i, escape(fx_name),
         reaper.TrackFX_GetEnabled(tr, i) and 1 or 0,
         reaper.TrackFX_GetOpen(tr, i) and 1 or 0,
+        fx_latency(tr, i),
       }, "\t")
     end
   end
