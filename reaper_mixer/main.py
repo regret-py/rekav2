@@ -48,6 +48,7 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QSplashScr
 
 from core import config
 from core.app_volume import create_backend
+from core.media import create_media_backend
 from core.process_manager import (AppNotInstalledError, OtherEditionRunningError, ProcessManager,
                                   ProcessManagerError, StartupAborted,
                                   installed_voicemeeter_kinds, reaper_project)
@@ -393,7 +394,8 @@ class MixerApp:
             save_config_quietly(self._cfg)  # chemins auto-détectés mémorisés
             self._window = MainWindow(cfg=self._cfg, vm=self._vm,
                                       reaper=self._host, processes=self._processes,
-                                      apps=create_backend(self._cfg), updater=self._updater)
+                                      apps=create_backend(self._cfg), updater=self._updater,
+                                      media=create_media_backend(self._cfg))
             if self._host.kind != HOST_REAPER:
                 self._host.start()    # FL Studio, Equalizer APO : dans le thread UI
         except Exception as exc:
@@ -696,11 +698,12 @@ def run_demo(app: QApplication, cfg: dict, selftest: str | None, host: str | Non
     """Console avec des moteurs simulés ; avec --selftest, capture puis quitte."""
     from core.app_volume import DemoAppVolumes
     from core.demo import DemoProcesses, DemoVoicemeeter
+    from core.media import DemoMedia
 
     vm, processes = DemoVoicemeeter(cfg), DemoProcesses()
     reaper = demo_host(cfg, host, processes)
     window = MainWindow(cfg=cfg, vm=vm, reaper=reaper, processes=processes, persist=False,
-                        apps=DemoAppVolumes())
+                        apps=DemoAppVolumes(), media=DemoMedia())
     if reaper.kind != HOST_REAPER:
         reaper.start()
     if selftest is None:
@@ -759,7 +762,7 @@ def run_selftest(app: QApplication, cfg: dict, window: MainWindow, vm, reaper, p
     for path, widget in shots.items():
         capture(path, widget)
     for title, suffix in (("Canaux", "canaux"), ("Apparence", "apparence"),
-                          ("À propos", "apropos")):              # autres onglets des réglages
+                          ("Couleurs", "couleurs"), ("À propos", "apropos")):   # autres onglets
         index = next(i for i in range(settings.tabs.count()) if settings.tabs.tabText(i) == title)
         settings.tabs.setCurrentIndex(index)
         pump(0.2)
@@ -782,6 +785,7 @@ def run_selftest(app: QApplication, cfg: dict, window: MainWindow, vm, reaper, p
             popup.close()
             pump(0.1)
     problems.extend(_selftest_app_volume(report))
+    problems.extend(_selftest_media(report, window))
 
     # Mises à jour : infos du build embarquées, fenêtre de mise à jour, accès en ligne
     problems.extend(_selftest_updates(report, window, pump, capture, image))
@@ -823,6 +827,31 @@ def _selftest_app_volume(report: list[str]) -> list[str]:
     except Exception as exc:          # pas de service audio sur la machine de build
         report.append(f"INFO volume par application : {exc}")
     return []
+
+
+def _selftest_media(report: list[str], window: MainWindow) -> list[str]:
+    """Lecteur du Master (démo) affiché ; sous Windows (exe compris), les modules
+    WinRT des contrôles média se chargent et Windows répond."""
+    problems = []
+    media = window.master.media
+    if media.isHidden() or media.info() is None or not media.cover.has_cover():
+        problems.append("lecteur de musique absent du Master")
+    if sys.platform != "win32":
+        return problems
+    try:
+        from core.media import create_media_backend, probe_media_controls
+        import winrt.windows.media.control  # noqa: F401
+        import winrt.windows.storage.streams  # noqa: F401
+    except Exception as exc:          # module absent de l'exe : vrai problème de build
+        return problems + [f"musique en cours : {exc}"]
+    if not create_media_backend({}).available:
+        problems.append("musique en cours : moteur Windows indisponible")
+    try:
+        report.append(f"OK  musique en cours : contrôles média de Windows joignables "
+                      f"({probe_media_controls()})")
+    except Exception as exc:          # pas de session utilisateur sur la machine de build
+        report.append(f"INFO musique en cours : {type(exc).__name__}: {exc}")
+    return problems
 
 
 def _selftest_updates(report: list[str], window: MainWindow, pump, capture, image: Path) -> list[str]:

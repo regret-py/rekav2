@@ -7,6 +7,8 @@ partagée avec les VU-mètres (graduations alignées) et les knobs.
 
 from __future__ import annotations
 
+import time
+
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
@@ -31,6 +33,7 @@ SCALE_W = 24                      # colonne des graduations
 WIDTH = SCALE_W + 6 + THUMB_W + 2
 DRAG_FINE = 0.25                  # Maj enfoncée : déplacement 4× plus fin
 WHEEL_STEP_DB = 0.5
+WHEEL_HOLD_S = 0.8                # après la molette, les relectures de Voicemeeter attendent
 
 
 def db_to_ratio(db: float) -> float:
@@ -70,6 +73,8 @@ class Fader(QWidget):
         self._dragging = False
         self._last_y = 0.0
         self._drag_ratio = 0.0
+        self._wheel_until = 0.0
+        self.color_scope: int | str | None = None   # canal (couleur personnalisée)
         self.setFixedWidth(WIDTH)
         self.setMinimumHeight(120)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
@@ -81,8 +86,9 @@ class Fader(QWidget):
         return self._value
 
     def setValue(self, db: float) -> None:  # noqa: N802 (style Qt)
-        """Valeur venant de Voicemeeter ; ignorée pendant que l'utilisateur glisse."""
-        if self._dragging or abs(db - self._value) < 0.005:
+        """Valeur venant de Voicemeeter ; ignorée pendant que l'utilisateur glisse
+        ou tourne la molette (une relecture antérieure ferait reculer le curseur)."""
+        if self.isInteracting() or abs(db - self._value) < 0.005:
             return
         self._value = db
         self.update()
@@ -92,7 +98,7 @@ class Fader(QWidget):
         self.update()
 
     def isInteracting(self) -> bool:  # noqa: N802
-        return self._dragging
+        return self._dragging or time.monotonic() < self._wheel_until
 
     # ------------------------------------------------------------- géométrie
     def _track(self) -> tuple[float, float]:
@@ -135,9 +141,10 @@ class Fader(QWidget):
         p.drawLine(QPointF(rail_x, top), QPointF(rail_x, bottom))
 
         # Remplissage accent sous le curseur (retour visuel de la position)
+        accent = styles.accent("fader", self.color_scope)
         cy = self._y_for(self._value)
         if not self._muted:
-            p.setPen(QPen(styles.color(styles.GREEN_NEON, 0.9), 2, Qt.PenStyle.SolidLine,
+            p.setPen(QPen(styles.color(accent, 0.9), 2, Qt.PenStyle.SolidLine,
                           Qt.PenCapStyle.RoundCap))
             p.drawLine(QPointF(rail_x, cy), QPointF(rail_x, bottom))
 
@@ -163,8 +170,8 @@ class Fader(QWidget):
             gradient.setColorAt(0.5, QColor("#a8a394"))
             gradient.setColorAt(1, QColor("#7d7869"))
         elif style == "fin":
-            gradient.setColorAt(0, QColor(styles.GREEN_BRIGHT))
-            gradient.setColorAt(1, QColor(styles.GREEN_NEON))
+            gradient.setColorAt(0, QColor(styles.accent_bright("fader", self.color_scope)))
+            gradient.setColorAt(1, QColor(accent))
         else:
             gradient.setColorAt(0, QColor(styles.WHITE))
             gradient.setColorAt(1, QColor("#d3d8de"))
@@ -172,10 +179,10 @@ class Fader(QWidget):
         p.setPen(QPen(styles.color(styles.WHITE, 0.35), 1))
         p.drawRoundedRect(thumb.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
         if self._dragging and not self._muted:   # halo pendant la saisie
-            p.setPen(QPen(styles.color(styles.GREEN_NEON, 0.8), 1.5))
+            p.setPen(QPen(styles.color(accent, 0.8), 1.5))
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRoundedRect(thumb.adjusted(-1.5, -1.5, 1.5, 1.5), radius + 1, radius + 1)
-        index = styles.TEXT_MUTED if self._muted else styles.GREEN_NEON
+        index = styles.TEXT_MUTED if self._muted else accent
         if style == "vintage":                   # stries + index central
             p.setPen(QPen(styles.color("#3b382f", 0.6), 1))
             for dy in (-6, -3, 3, 6):
@@ -227,6 +234,8 @@ class Fader(QWidget):
         steps = event.angleDelta().y() / 120
         step = 0.1 if event.modifiers() & Qt.KeyboardModifier.ShiftModifier else WHEEL_STEP_DB
         base = min(self._value, FADER_MAX_DB)
+        if steps:
+            self._wheel_until = time.monotonic() + WHEEL_HOLD_S
         self._user_set(max(FADER_MIN_DB, min(FADER_MAX_DB, base + steps * step)))
         event.accept()
 

@@ -53,11 +53,12 @@ def mixer(qapp, cfg):
     """Console en démo (Voicemeeter et REAPER simulés), affichée."""
     from core.app_volume import DemoAppVolumes
     from core.demo import DemoProcesses, DemoReaper, DemoVoicemeeter
+    from core.media import DemoMedia
     from ui.main_window import MainWindow
 
     vm, reaper = DemoVoicemeeter(cfg), DemoReaper(cfg)
     window = MainWindow(cfg=cfg, vm=vm, reaper=reaper, processes=DemoProcesses(), persist=False,
-                        apps=DemoAppVolumes())
+                        apps=DemoAppVolumes(), media=DemoMedia())
     window.resize(1920, 1040)
     window.show()
     pump(qapp, 0.2)

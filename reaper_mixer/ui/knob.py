@@ -6,12 +6,14 @@ Knob circulaire custom (paintEvent, antialiasé).
 - Master (casque) : pas de bascule ; le dessin suit la valeur avec une
   interpolation douce, y compris pendant le glisser.
 
-Course de 270° (vide en bas), même loi dB que les faders : 0 dB = butée haute.
+Valeurs par pas de 0,5 dB (glisser comme molette : un cran = 0,5 dB). Course
+de 270° (vide en bas), même loi dB que les faders : 0 dB = butée haute.
 """
 
 from __future__ import annotations
 
 import math
+import time
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPen, QRadialGradient
@@ -25,7 +27,12 @@ SPAN = 270.0
 DRAG_PX = 160.0          # pixels de glisser pour toute la course
 DRAG_FINE = 0.25
 CLICK_SLOP = 3.0         # au-delà, un appui devient un glisser (et plus un clic)
-WHEEL_STEP = 0.025
+STEP_DB = 0.5            # pas de réglage (glisser et molette)
+WHEEL_NOTCH = 120        # un cran de molette ; les molettes « haute résolution » envoient moins
+# Après un cran de molette, les valeurs relues dans Voicemeeter sont ignorées un
+# instant : celles déjà en route vers l'UI sont antérieures au réglage et
+# ramèneraient le knob en arrière (la molette « collait » sur les PC rapides)
+WHEEL_HOLD_S = 0.8
 SMOOTH_MS = 16
 SMOOTH_FACTOR = 0.28
 
@@ -33,6 +40,12 @@ SMOOTH_FACTOR = 0.28
 def _position(db: float) -> float:
     """dB → position sur la course (0 = -60 dB, 1 = +12 dB)."""
     return 1.0 - db_to_ratio(db)
+
+
+def snap_db(db: float) -> float:
+    """Valeur ramenée sur la grille de 0,5 dB, dans la plage des faders."""
+    db = max(FADER_MIN_DB, min(FADER_MAX_DB, db))
+    return round(db / STEP_DB) * STEP_DB + 0.0     # + 0.0 : pas de « -0.0 »
 
 
 class Knob(QWidget):
@@ -55,6 +68,11 @@ class Knob(QWidget):
         self._moved = False
         self._press_y = 0.0
         self._press_pos = 0.0
+        self._wheel_delta = 0           # crans de molette pas encore appliqués (1/120)
+        self._wheel_until = 0.0
+        # Couleur personnalisée (styles.element_color) : élément et canal du knob
+        self.color_element = "knob"
+        self.color_scope: int | str | None = None
         self._timer = QTimer(self)
         self._timer.setInterval(SMOOTH_MS)
         self._timer.timeout.connect(self._animate)
@@ -69,8 +87,9 @@ class Knob(QWidget):
         return self._value
 
     def setValue(self, db: float) -> None:  # noqa: N802
-        """Valeur venant de Voicemeeter ; ignorée pendant un glisser."""
-        if self._dragging or abs(db - self._value) < 0.005:
+        """Valeur venant de Voicemeeter ; ignorée pendant un glisser ou juste
+        après un cran de molette."""
+        if self.isInteracting() or abs(db - self._value) < 0.005:
             return
         self._value = db
         self._retarget()
@@ -85,7 +104,7 @@ class Knob(QWidget):
             self.update()
 
     def isInteracting(self) -> bool:  # noqa: N802
-        return self._dragging
+        return self._dragging or time.monotonic() < self._wheel_until
 
     # -------------------------------------------------------------- dessin
     def paintEvent(self, _event) -> None:  # noqa: N802
@@ -99,29 +118,31 @@ class Knob(QWidget):
         pos = max(0.0, min(1.0, self._shown))
         span_value = -SPAN * pos
         arc = int(START_ANGLE * 16)
+        accent = styles.accent(self.color_element, self.color_scope)
+        dim = styles.accent_dim(self.color_element, self.color_scope)
 
         if self._active:
             # Halo, piste, puis arc de valeur
-            p.setPen(QPen(styles.color(styles.GREEN_NEON, 0.16), ring * 2.0,
+            p.setPen(QPen(styles.color(accent, 0.16), ring * 2.0,
                           Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
             p.drawArc(arc_rect, arc, int(span_value * 16))
-            p.setPen(QPen(styles.color(styles.GREEN_DIM, 0.7), ring,
+            p.setPen(QPen(styles.color(dim, 0.7), ring,
                           Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
             p.drawArc(arc_rect, arc, int(-SPAN * 16))
             if pos > 0.002:
-                p.setPen(QPen(QColor(styles.GREEN_NEON), ring,
+                p.setPen(QPen(QColor(accent), ring,
                               Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
                 p.drawArc(arc_rect, arc, int(span_value * 16))
         else:
             # Éteint : piste à peine visible + point vert au départ de la course
-            p.setPen(QPen(styles.color(styles.GREEN_DIM, 0.25), ring * 0.6,
+            p.setPen(QPen(styles.color(dim, 0.25), ring * 0.6,
                           Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
             p.drawArc(arc_rect, arc, int(-SPAN * 16))
             start = math.radians(START_ANGLE)
             r = arc_rect.width() / 2
             dot = QPointF(center.x() + r * math.cos(start), center.y() - r * math.sin(start))
             p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(styles.color(styles.GREEN_NEON, 0.85))
+            p.setBrush(styles.color(accent, 0.85))
             p.drawEllipse(dot, ring * 0.45, ring * 0.45)
 
         # Bouton central
@@ -180,13 +201,23 @@ class Knob(QWidget):
         if not self._adjustable:
             event.ignore()
             return
-        steps = event.angleDelta().y() / 120
-        factor = DRAG_FINE if event.modifiers() & Qt.KeyboardModifier.ShiftModifier else 1.0
-        self._user_set_position(_position(min(self._value, FADER_MAX_DB)) + steps * WHEEL_STEP * factor)
         event.accept()
+        delta = event.angleDelta().y() or event.angleDelta().x()
+        if delta == 0:
+            return
+        now = time.monotonic()
+        if now > self._wheel_until or (delta > 0) != (self._wheel_delta > 0):
+            self._wheel_delta = 0           # nouveau geste ou changement de sens : de zéro
+        self._wheel_until = now + WHEEL_HOLD_S
+        # Molettes haute résolution (crans fractionnés) : on cumule jusqu'au cran entier
+        self._wheel_delta += delta
+        steps = int(self._wheel_delta / WHEEL_NOTCH)
+        if steps:
+            self._wheel_delta -= steps * WHEEL_NOTCH
+            self._user_set(snap_db(min(self._value, FADER_MAX_DB) + steps * STEP_DB))
 
     def _user_set_position(self, pos: float) -> None:
-        self._user_set(round(ratio_to_db(1.0 - max(0.0, min(1.0, pos))), 1))
+        self._user_set(snap_db(ratio_to_db(1.0 - max(0.0, min(1.0, pos)))))
 
     def _user_set(self, db: float) -> None:
         db = max(FADER_MIN_DB, min(FADER_MAX_DB, db))

@@ -45,6 +45,7 @@ class VuMeter(QWidget):
         self._peak_t = [0.0] * channels
         self._clip_until = [0.0] * channels
         self._t = time.monotonic()
+        self.color_scope: int | str | None = None   # canal ou Master (couleur personnalisée)
         width = channels * bar_width + (channels - 1) * gap + (6 if clip_leds else 0)
         self.setFixedWidth(width)
         self.setMinimumHeight(60)
@@ -78,8 +79,9 @@ class VuMeter(QWidget):
 
         gradient = QLinearGradient(0, bottom, 0, top)
         # Couleur du thème (niveaux normaux) → jaune (zone haute) → rouge (crêtes)
-        gradient.setColorAt(0.0, QColor(styles.GREEN_NEON).darker(115))
-        gradient.setColorAt(_gradient_stop(-18), QColor(styles.GREEN_NEON))
+        accent = styles.accent("vu", self.color_scope)
+        gradient.setColorAt(0.0, QColor(accent).darker(115))
+        gradient.setColorAt(_gradient_stop(-18), QColor(accent))
         gradient.setColorAt(_gradient_stop(-9), QColor(styles.VU_YELLOW))
         gradient.setColorAt(_gradient_stop(-3), QColor(styles.VU_YELLOW))
         gradient.setColorAt(_gradient_stop(-1.5), QColor(styles.VU_RED))

@@ -9,6 +9,10 @@ Thèmes : la palette de référence est verte. Un thème donne une couleur
 d'accent ; toutes les teintes vertes (accent, fonds teintés, bordures, textes
 gris-vert) tournent vers sa teinte, en gardant leur luminosité. Le rouge du
 mute, le jaune des VU et le blanc ne changent pas.
+
+Couleurs par élément (config ui.colors) : chaque élément (knob Discord,
+bouton Muet, VU…) peut avoir sa propre couleur, pour toute la console ou pour
+un seul canal ; sinon il suit le thème. Voir element_color().
 """
 
 from __future__ import annotations
@@ -130,18 +134,121 @@ DEFAULT_VU_STYLE = "segments"
 FADER_STYLE = DEFAULT_FADER_STYLE
 VU_STYLE = DEFAULT_VU_STYLE
 
+# --- Couleurs par élément ---------------------------------------------------
+# Clés de config ui.colors : « mute » (toute la console), « mute@2 » (canal 3
+# seulement), « vu@master » (Master seulement). La couleur d'un canal passe
+# avant celle de toute la console ; sans couleur, l'élément suit le thème.
+MASTER_SCOPE = "master"
+STRIP_ELEMENTS = ("send0", "send1", "send2", "send3", "fader", "vu", "mute", "fx_badge",
+                  "fx_pill", "pad", "apps", "name", "panel")
+MASTER_ELEMENTS = ("headphone", "vu", "engines", "media", "panel")
+ELEMENT_LABELS = {            # « send0 »… : nom du knob d'envoi (config voicemeeter.routing)
+    "fader": "Fader",
+    "vu": "VU-mètres",
+    "mute": "Bouton Muet (allumé)",
+    "fx_badge": "Badge FX",
+    "fx_pill": "Effets (pills)",
+    "pad": "Intellipan (petit cube)",
+    "apps": "Bouton Apps",
+    "name": "Nom du canal",
+    "panel": "Fond du panneau",
+    "headphone": "Knob Casque",
+    "engines": "Boutons Voicemeeter / REAPER",
+    "media": "Lecteur de musique",
+}
+COLORS: dict[str, str] = {}   # couleurs choisies (config ui.colors), « #rrggbb »
+_panel_opacity = 1.0
+
+
+def _valid_colors(value) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    colors = {}
+    for key, raw in value.items():
+        c = QColor(str(raw)) if isinstance(raw, str) and raw.startswith("#") else QColor()
+        if isinstance(key, str) and c.isValid():
+            colors[key] = c.name()
+    return colors
+
 
 def configure(ui_cfg: dict) -> bool:
-    """Police et styles de widgets d'après la config `ui` ; True si quelque chose a changé."""
-    global FONT_FAMILY, FADER_STYLE, VU_STYLE
+    """Police, styles de widgets et couleurs par élément d'après la config `ui` ;
+    True si quelque chose a changé."""
+    global FONT_FAMILY, FADER_STYLE, VU_STYLE, COLORS
     family = str(ui_cfg.get("font_family") or DEFAULT_FONT).strip() or DEFAULT_FONT
     fader = ui_cfg.get("fader_style")
     fader = fader if fader in FADER_STYLES else DEFAULT_FADER_STYLE
     vu = ui_cfg.get("vu_style")
     vu = vu if vu in VU_STYLES else DEFAULT_VU_STYLE
-    changed = (family, fader, vu) != (FONT_FAMILY, FADER_STYLE, VU_STYLE)
-    FONT_FAMILY, FADER_STYLE, VU_STYLE = family, fader, vu
+    colors = _valid_colors(ui_cfg.get("colors"))
+    changed = (family, fader, vu, colors) != (FONT_FAMILY, FADER_STYLE, VU_STYLE, COLORS)
+    FONT_FAMILY, FADER_STYLE, VU_STYLE, COLORS = family, fader, vu, colors
     return changed
+
+
+def color_key(element: str, scope: int | str | None = None) -> str:
+    """Clé de ui.colors : « mute » pour toute la console, « mute@2 » pour un canal."""
+    return element if scope is None else f"{element}@{scope}"
+
+
+def element_color(element: str, scope: int | str | None = None,
+                  colors: dict | None = None) -> str | None:
+    """Couleur choisie pour un élément : celle de son canal (ou du Master), sinon
+    celle de toute la console ; None s'il suit le thème. `colors` : une config
+    ui.colors à consulter à la place de celle appliquée."""
+    colors = COLORS if colors is None else _valid_colors(colors)
+    if scope is not None and color_key(element, scope) in colors:
+        return colors[color_key(element, scope)]
+    return colors.get(element)
+
+
+def element_default(element: str) -> str:
+    """Couleur d'un élément quand il suit le thème."""
+    return {"mute": MUTE_ON, "pad": RED_MUTE, "name": TEXT_PRIMARY,
+            "panel": BG_COLUMN}.get(element, GREEN_NEON)
+
+
+def accent(element: str, scope: int | str | None = None) -> str:
+    """Couleur principale d'un élément (arc d'un knob, remplissage d'un fader…)."""
+    return element_color(element, scope) or element_default(element)
+
+
+def accent_dim(element: str, scope: int | str | None = None) -> str:
+    """Teinte sombre assortie (piste d'un knob, bordure éteinte)."""
+    custom = element_color(element, scope)
+    return _mix(QColor(custom), QColor(BG_SECTION), 0.7).name() if custom else GREEN_DIM
+
+
+def accent_bright(element: str, scope: int | str | None = None) -> str:
+    """Teinte de survol assortie."""
+    custom = element_color(element, scope)
+    return _mix(QColor(custom), QColor(WHITE), HOVER_TOWARD_WHITE).name() if custom else GREEN_BRIGHT
+
+
+def mix(a: str, b: str, amount: float) -> str:
+    """Couleur entre `a` (0) et `b` (1)."""
+    return _mix(QColor(a), QColor(b), amount).name()
+
+
+def ink_on(value: str) -> str:
+    """Encre lisible sur une couleur de fond (texte d'un bouton allumé)."""
+    background = QColor(value)
+    dark = QColor(ON_ACCENT_DARK)
+    return dark.name() if contrast(background, dark) >= contrast(background, QColor(WHITE)) else WHITE
+
+
+def mute_style(value: str) -> str:
+    """QSS du bouton Muet allumé dans une couleur choisie."""
+    hover = _mix(QColor(value), QColor(WHITE), 0.15).name()
+    return (f"QPushButton#muteButton:checked {{ background: {value}; border: 1px solid {hover};"
+            f" color: {ink_on(value)}; }}"
+            f"QPushButton#muteButton:checked:hover {{ background: {hover}; }}")
+
+
+def panel_style(value: str) -> str:
+    """QSS du fond d'une colonne (strip, Master) dans une couleur choisie, avec
+    l'opacité des panneaux en cours."""
+    return f"QFrame#column {{ background: {_rgba(value, _panel_opacity)}; }}"
 
 
 def font(pixel_size: int, weight: QFont.Weight = QFont.Weight.Normal) -> QFont:
@@ -252,6 +359,8 @@ def build_stylesheet(panel_opacity: float = 1.0) -> str:
     """QSS de l'application, aux couleurs du thème en cours. `panel_opacity`
     < 1 laisse voir l'arrière-plan (image personnalisée) à travers les
     colonnes et leurs blocs."""
+    global _panel_opacity
+    _panel_opacity = panel_opacity
     return (_stylesheet()
             .replace("@COLUMN_BG@", _rgba(BG_COLUMN, panel_opacity))
             .replace("@SECTION_BG@", _rgba(BG_SECTION, panel_opacity)))

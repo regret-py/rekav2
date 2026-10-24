@@ -6,6 +6,9 @@ fader + VU, nom éditable (double-clic).
 
 Le strip ne parle à aucun moteur : il émet des signaux, la fenêtre principale
 les relaie à Voicemeeter / REAPER, et lui renvoie l'état réel.
+
+Chaque élément peut avoir sa couleur, pour ce canal ou toute la console
+(styles.element_color, réglages → Couleurs) : apply_colors() l'applique.
 """
 
 from __future__ import annotations
@@ -54,6 +57,7 @@ class FxBadge(QAbstractButton):
         super().__init__(parent)
         self._tips = ("Effets actifs — clic pour tout bypasser",
                       "Effets en bypass — clic pour les réactiver")
+        self.color_scope: int | None = None     # canal (couleur personnalisée)
         self.setCheckable(True)
         self.setChecked(True)
         self.setFixedSize(28, 28)
@@ -73,12 +77,14 @@ class FxBadge(QAbstractButton):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = QRectF(2, 2, self.width() - 4, self.height() - 4)
         on = self.isChecked() and self.isEnabled()   # sans piste REAPER : éteint
+        custom = styles.element_color("fx_badge", self.color_scope)
         if on:
-            p.setPen(QPen(styles.color(styles.GREEN_NEON, 0.25), 3))
-            p.setBrush(QColor(styles.GREEN_NEON))
-            ink = QColor(styles.ON_ACCENT)
+            accent = custom or styles.GREEN_NEON
+            p.setPen(QPen(styles.color(accent, 0.25), 3))
+            p.setBrush(QColor(accent))
+            ink = QColor(styles.ink_on(custom) if custom else styles.ON_ACCENT)
         else:
-            p.setPen(QPen(QColor(styles.GREEN_DIM), 1.5))
+            p.setPen(QPen(QColor(styles.accent_dim("fx_badge", self.color_scope)), 1.5))
             p.setBrush(QColor(styles.BADGE_OFF))
             ink = QColor(styles.TEXT_MUTED)
         if self.underMouse():
@@ -114,6 +120,7 @@ class AppsButton(QAbstractButton):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._count = 0
+        self.color_scope: int | None = None     # canal (couleur personnalisée)
         self.setFixedSize(APPS_BUTTON_WIDTH, MUTE_HEIGHT)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip("Volume par application")
@@ -133,7 +140,8 @@ class AppsButton(QAbstractButton):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = QRectF(0.5, 0.5, self.width() - 1, self.height() - 1)
         hover = self.underMouse() or self.isDown()
-        p.setPen(QPen(QColor(styles.GREEN_DIM if hover else styles.BORDER_COLUMN), 1))
+        p.setPen(QPen(QColor(styles.accent_dim("apps", self.color_scope) if hover
+                             else styles.BORDER_COLUMN), 1))
         p.setBrush(QColor(styles.BUTTON_HOVER if hover else styles.BUTTON_BG))
         p.drawRoundedRect(rect, 7, 7)
         # Icône : trois glissières horizontales
@@ -146,7 +154,7 @@ class AppsButton(QAbstractButton):
             p.setBrush(ink)
             p.drawEllipse(QPointF(left + 12 * knob, y), 1.8, 1.8)
         p.setFont(styles.font(10, QFont.Weight.DemiBold))
-        p.setPen(QColor(styles.GREEN_NEON if self._count else styles.TEXT_MUTED))
+        p.setPen(QColor(styles.accent("apps", self.color_scope) if self._count else styles.TEXT_MUTED))
         p.drawText(QRectF(left + 15, 0, self.width() - left - 19, self.height()),
                    Qt.AlignmentFlag.AlignCenter, str(self._count))
 
@@ -178,6 +186,7 @@ class FxList(QWidget):
         self._enabled = True
         self._add_label = "+ Ajouter un effet"
         self._hint = ""
+        self.color_scope: int | None = None     # canal (couleur des pills)
         self.setMouseTracking(True)
         self._resize_for(0)
 
@@ -203,6 +212,7 @@ class FxList(QWidget):
                 self._pills[index].set_info(name, enabled, is_open)
                 continue
             pill = FxPill(name, enabled, is_open, self)
+            pill.color_scope = self.color_scope
             pill.clicked.connect(lambda i=index: self.openRequested.emit(i))
             pill.bypassRequested.connect(lambda on, i=index: self.bypassRequested.emit(i, on))
             pill.removeRequested.connect(lambda i=index: self.removeRequested.emit(i))
@@ -310,6 +320,12 @@ class EditableLabel(QWidget):
     def setText(self, text: str) -> None:  # noqa: N802
         self._label.setText(text)
 
+    def set_color(self, value: str | None) -> None:
+        """Couleur du nom (None : celle du thème)."""
+        sheet = f"QLabel#stripName {{ color: {value}; }}" if value else ""
+        if self._label.styleSheet() != sheet:
+            self._label.setStyleSheet(sheet)
+
     def mouseDoubleClickEvent(self, _event) -> None:  # noqa: N802
         self.start_editing()
 
@@ -400,6 +416,27 @@ class StripWidget(QFrame):
         self.name.setFixedHeight(NAME_HEIGHT)
         self.name.edited.connect(lambda text: self.renamed.emit(self.index, text))
         layout.addWidget(self.name)
+
+        # Couleurs personnalisées : chaque élément dessiné connaît son canal
+        for widget in (self.fader, self.vu, self.fx_badge, self.fx_list, self.pad, self.apps):
+            if widget is not None:
+                widget.color_scope = index
+        for route, knob in enumerate(self.knobs):
+            knob.color_element, knob.color_scope = f"send{route}", index
+        self.apply_colors()
+
+    def apply_colors(self) -> None:
+        """Couleurs choisies pour les éléments en feuille de style (Muet, nom,
+        fond) ; les éléments dessinés les relisent en se redessinant."""
+        mute = styles.element_color("mute", self.index)
+        sheet = styles.mute_style(mute) if mute else ""
+        if self.mute.styleSheet() != sheet:
+            self.mute.setStyleSheet(sheet)
+        self.name.set_color(styles.element_color("name", self.index))
+        panel = styles.element_color("panel", self.index)
+        sheet = styles.panel_style(panel) if panel else ""
+        if self.styleSheet() != sheet:
+            self.setStyleSheet(sheet)
 
     # ------------------------------------------------------------ sections
     def _build_fx_section(self) -> QFrame:

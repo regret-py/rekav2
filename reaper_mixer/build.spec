@@ -26,6 +26,16 @@ def _constant(name):
     return re.search(rf'^{name} = "([^"]*)"', _config_source, re.MULTILINE).group(1)
 
 
+# Musique en cours : WinRT (importé dans un thread, donc invisible pour l'analyse)
+# et la DLL C++ livrée à côté de ses modules
+try:
+    from PyInstaller.utils.hooks import collect_dynamic_libs
+    WINRT_BINARIES = collect_dynamic_libs("winrt")
+except Exception:              # build hors Windows : pas de WinRT
+    WINRT_BINARIES = []
+WINRT_MODULES = ["winrt.runtime", "winrt.windows.foundation", "winrt.windows.media.control",
+                 "winrt.windows.storage.streams"]
+
 APP_VERSION = _constant("APP_VERSION")
 APP_AUTHORS = _constant("APP_AUTHORS")
 _numbers = tuple(int(n) for n in re.findall(r"\d+", APP_VERSION))[:4]
@@ -53,7 +63,7 @@ version_info = None if VSVersionInfo is None else VSVersionInfo(
 a = Analysis(
     ["main.py"],
     pathex=[],
-    binaries=[],
+    binaries=WINRT_BINARIES,
     # Ressources lues à l'exécution via core.config.resource_path()
     datas=[
         ("config.json", "."),
@@ -62,7 +72,8 @@ a = Analysis(
         *([("build_info.json", ".")] if os.path.isfile(os.path.join(SPECPATH, "build_info.json")) else []),
     ],
     # Importés à l'intérieur de fonctions : on les déclare explicitement
-    hiddenimports=["voicemeeterlib", "core.demo", "pycaw.utils", "pycaw.api.endpointvolume"],
+    hiddenimports=["voicemeeterlib", "core.demo", "pycaw.utils", "pycaw.api.endpointvolume",
+                   *WINRT_MODULES],
     hookspath=[],
     runtime_hooks=[],
     excludes=["tkinter", "unittest", "pydoc", "PySide6.QtQml", "PySide6.QtQuick",
