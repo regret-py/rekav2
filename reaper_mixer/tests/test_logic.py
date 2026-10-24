@@ -734,6 +734,20 @@ def test_winrt_wait_timeout_and_errors():
     with pytest.raises(OSError):
         winrt_wait(_Op(status=3, error=OSError("refusé")))
 
+    class NoWait:                       # opération sans wait() : état surveillé
+        def __init__(self):
+            self.polls = 0
+
+        @property
+        def status(self):
+            self.polls += 1
+            return 1 if self.polls > 3 else 0
+
+        def get_results(self):
+            return "fini"
+
+    assert winrt_wait(NoWait()) == "fini"
+
 
 def test_windows_media_thread(qapp, fake_winrt):
     """Thread des contrôles média : morceau, pochette, état de lecture, commandes."""

@@ -23,6 +23,7 @@ import importlib.util
 import logging
 import sys
 import threading
+import time
 from dataclasses import dataclass, replace
 
 from PySide6.QtCore import QObject, Signal
@@ -190,9 +191,13 @@ class DemoMedia(MediaBackend):
 def winrt_wait(operation, timeout: float = WINRT_TIMEOUT_S):
     """Résultat d'une opération asynchrone WinRT, en bloquant au plus `timeout` s."""
     waiter = getattr(operation, "wait", None)
-    if waiter is None:
-        return operation.get()
-    status = int(waiter(timeout))
+    if waiter is not None:
+        status = int(waiter(timeout))
+    else:                                 # classe sans wait() : on surveille son état
+        deadline = time.monotonic() + timeout
+        while int(operation.status) == 0 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        status = int(operation.status)
     if status not in (ASYNC_COMPLETED, ASYNC_ERROR):
         with contextlib.suppress(Exception):
             operation.cancel()
