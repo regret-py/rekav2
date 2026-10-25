@@ -225,6 +225,12 @@ def resolve_device(device: str, endpoints: list[Endpoint]) -> tuple[str, str]:
     exact = [e for e in endpoints if e.name.lower() == lower]
     starts = [e for e in endpoints if e.name.lower().startswith(lower + " (")]
     found = exact or starts
+    if not found and device in VIRTUAL_DEVICES:
+        # Entrée virtuelle renommée (« REKA Appels ») : reconnue par son pilote
+        from core.app_volume import match_device
+
+        index = VIRTUAL_DEVICES.index(device)
+        found = [e for e in endpoints if not e.capture and match_device(e.name, index)]
     if len(found) == 1:
         return found[0].guid, found[0].name
     return device, device

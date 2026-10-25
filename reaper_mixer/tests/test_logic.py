@@ -610,3 +610,43 @@ def test_app_volume_device_matching_and_demo():
     assert discord.volume == 0.3 and discord.muted and discord.peak == 0.0
     assert demo.apps(2) == [] and demo.device_name(2)
     assert not NullAppVolumes().available and NullAppVolumes().apps(0) == []
+
+
+# ------------------------------------------------ noms Windows des périphériques
+def test_device_names_plan_renames_and_restores():
+    from core.device_names import Endpoint, endpoint_key, plan, wanted_names
+
+    assert endpoint_key("VB-Audio Voicemeeter VAIO", capture=True) == "B1"
+    assert endpoint_key("VB-Audio Voicemeeter AUX VAIO", capture=True) == "B2"
+    assert endpoint_key("VB-Audio Voicemeeter VAIO3", capture=True) == "B3"
+    assert endpoint_key("VB-Audio Voicemeeter AUX VAIO", capture=False) == "in1"
+    assert endpoint_key("Realtek High Definition Audio", capture=True) is None
+
+    cfg = {"voicemeeter": {"kind": "potato"},
+           "ui": {"strip_names": ["Microphone", "Musique", "Appels", "Bureau", "Autres 1", "Autres 2"]}}
+    names = wanted_names(cfg)
+    assert names["B1"] == "REKA Micro" and names["B2"] == "REKA Discord" and names["B3"] == "REKA Obs"
+    assert names["in0"] == "REKA Appels" and names["in1"] == "REKA Bureau" and names["in2"] == "REKA Autres 2"
+
+    endpoints = [Endpoint("B1", "Voicemeeter Out B1", "VB-Audio Voicemeeter VAIO"),
+                 Endpoint("B2", "REKA Discord", "VB-Audio Voicemeeter AUX VAIO"),
+                 Endpoint("in2", "Mon câble", "VB-Audio Voicemeeter VAIO3")]
+    assert [(e.key, n) for e, n in plan(cfg, endpoints)] == [("B1", "REKA Micro"), ("in2", "REKA Autres 2")]
+
+    # Nom choisi dans config.json
+    cfg["voicemeeter"]["device_names"] = {"B1": "Mon Micro"}
+    assert plan(cfg, endpoints)[0][1] == "Mon Micro"
+
+    # Option désactivée : seuls les noms REKA reviennent à l'origine
+    cfg["voicemeeter"]["rename_devices"] = False
+    assert [(e.key, n) for e, n in plan(cfg, endpoints)] == [("B2", "Voicemeeter Out B2")]
+
+
+def test_apo_finds_renamed_virtual_input():
+    from core.apo_ctrl import Endpoint, resolve_device
+
+    endpoints = [Endpoint("REKA Appels (VB-Audio Voicemeeter VAIO)", "{aaa}", False),
+                 Endpoint("REKA Micro (VB-Audio Voicemeeter VAIO)", "{bbb}", True),
+                 Endpoint("REKA Bureau (VB-Audio Voicemeeter AUX VAIO)", "{ccc}", False)]
+    assert resolve_device("Voicemeeter Input", endpoints)[0] == "{aaa}"
+    assert resolve_device("Voicemeeter AUX Input", endpoints)[0] == "{ccc}"

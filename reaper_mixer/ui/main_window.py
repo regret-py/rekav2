@@ -192,7 +192,7 @@ class Toast(QLabel):
 class MainWindow(QMainWindow):
     def __init__(self, cfg: dict, vm, reaper, processes, persist: bool = True,
                  apps: AppVolumeBackend | None = None, updater: UpdateChecker | None = None,
-                 parent: QWidget | None = None) -> None:
+                 devices=None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._cfg = cfg
         self._persist = persist          # False en mode démo : la config n'est pas touchée
@@ -201,6 +201,8 @@ class MainWindow(QMainWindow):
         self._processes = processes
         self._apps = apps or NullAppVolumes()
         self._updater = updater
+        self._devices = devices          # noms Windows des périphériques Voicemeeter (ou None)
+        QTimer.singleShot(0, self._rename_devices)   # au démarrage, une fois la console affichée
         self._update: UpdateInfo | None = None
         self._app_mixer: AppMixerPopup | None = None
         self._params: MixerParams | None = None
@@ -490,6 +492,15 @@ class MainWindow(QMainWindow):
         self._reaper.rename_track(index, name)
         self._vm.set_label(index, name)
         self._save_config()
+        self._rename_devices()
+
+    def _rename_devices(self) -> None:
+        """Périphériques Windows de Voicemeeter : « REKA Micro », « REKA <strip> »…"""
+        if self._devices is not None:
+            try:
+                self._devices.apply()
+            except Exception:
+                log.exception("Renommage des périphériques Voicemeeter impossible")
 
     def add_effect(self, index: int) -> None:
         strip, host = self.strips[index], self._reaper
@@ -555,6 +566,7 @@ class MainWindow(QMainWindow):
         dialog = SettingsDialog(self._cfg, self._processes, self._reaper, self._vm, self,
                                 persist=self._persist, updater=self._updater)
         dialog.optionsChanged.connect(lambda: self._on_tracks(self._tracks))
+        dialog.optionsChanged.connect(self._rename_devices)
         dialog.projectRequested.connect(self.choose_project)
         dialog.appearanceChanged.connect(self.apply_appearance)
         dialog.windowResetRequested.connect(self.reset_window_size)
