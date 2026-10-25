@@ -48,6 +48,7 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QSplashScr
 
 from core import config
 from core.app_volume import create_backend
+from core.device_names import DeviceRenamer
 from core.process_manager import (AppNotInstalledError, OtherEditionRunningError, ProcessManager,
                                   ProcessManagerError, StartupAborted,
                                   installed_voicemeeter_kinds, reaper_project)
@@ -393,7 +394,8 @@ class MixerApp:
             save_config_quietly(self._cfg)  # chemins auto-détectés mémorisés
             self._window = MainWindow(cfg=self._cfg, vm=self._vm,
                                       reaper=self._host, processes=self._processes,
-                                      apps=create_backend(self._cfg), updater=self._updater)
+                                      apps=create_backend(self._cfg), updater=self._updater,
+                                      devices=DeviceRenamer(self._cfg))
             if self._host.kind != HOST_REAPER:
                 self._host.start()    # FL Studio, Equalizer APO : dans le thread UI
         except Exception as exc:
@@ -673,6 +675,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--setup", action="store_true")
     parser.add_argument("--selftest", metavar="IMAGE")
     parser.add_argument("--restart", action="store_true")  # relance depuis les réglages
+    parser.add_argument("--rename-devices", action="store_true")  # relance en administrateur
     args, _qt_args = parser.parse_known_args(argv[1:])
     return args
 
@@ -858,6 +861,12 @@ def main() -> int:
     install_exception_hooks()
     log.info("=== %s %s — Python %s, %s ===", config.APP_NAME, config.APP_VERSION,
              platform.python_version(), platform.platform())
+
+    if args.rename_devices:
+        # Instance lancée en administrateur : renomme les périphériques et quitte
+        from core.device_names import run_elevated
+
+        return run_elevated(config.load_config())
 
     set_windows_app_id()
     qInstallMessageHandler(qt_message_handler)

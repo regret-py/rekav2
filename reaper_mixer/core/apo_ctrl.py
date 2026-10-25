@@ -225,6 +225,13 @@ def resolve_device(device: str, endpoints: list[Endpoint]) -> tuple[str, str]:
     exact = [e for e in endpoints if e.name.lower() == lower]
     starts = [e for e in endpoints if e.name.lower().startswith(lower + " (")]
     found = exact or starts
+    if not found and device in VIRTUAL_DEVICES:
+        # Entrée virtuelle renommée par REKA (« REKA aux ») : cherchée sous ce nom
+        from core.device_names import DEFAULT_NAMES
+
+        alias = DEFAULT_NAMES[f"in{VIRTUAL_DEVICES.index(device)}"].lower()
+        found = [e for e in endpoints if not e.capture
+                 and (e.name.lower() == alias or e.name.lower().startswith(alias + " ("))]
     if len(found) == 1:
         return found[0].guid, found[0].name
     return device, device

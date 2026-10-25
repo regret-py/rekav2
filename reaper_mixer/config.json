@@ -27,7 +27,9 @@
     "terminate_on_exit": true,
     "app_devices": [],
     "buffer": 0,
-    "wdm_shared": false
+    "wdm_shared": false,
+    "rename_devices": true,
+    "device_names": {}
   },
   "update": {
     "check_on_start": true,
