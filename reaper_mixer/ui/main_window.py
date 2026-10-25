@@ -202,6 +202,7 @@ class MainWindow(QMainWindow):
         self._apps = apps or NullAppVolumes()
         self._updater = updater
         self._devices = devices          # noms Windows des périphériques Voicemeeter (ou None)
+        self._devices_warned = False
         QTimer.singleShot(0, self._rename_devices)   # au démarrage, une fois la console affichée
         self._update: UpdateInfo | None = None
         self._app_mixer: AppMixerPopup | None = None
@@ -492,15 +493,23 @@ class MainWindow(QMainWindow):
         self._reaper.rename_track(index, name)
         self._vm.set_label(index, name)
         self._save_config()
-        self._rename_devices()
 
     def _rename_devices(self) -> None:
-        """Périphériques Windows de Voicemeeter : « REKA Micro », « REKA <strip> »…"""
-        if self._devices is not None:
-            try:
-                self._devices.apply()
-            except Exception:
-                log.exception("Renommage des périphériques Voicemeeter impossible")
+        """Périphériques Windows de Voicemeeter : « REKA insert », « REKA B1 »…"""
+        if self._devices is None:
+            return
+        try:
+            lost = self._devices.apply()
+        except Exception:
+            log.exception("Renommage des périphériques Voicemeeter impossible")
+            return
+        if lost and not self._devices_warned:
+            self._devices_warned = True
+            QMessageBox.warning(
+                self, "Périphériques Voicemeeter",
+                "REKA ne retrouve pas le nom d'origine de ces périphériques Windows :\n\n"
+                + "\n".join(f"• {name}" for name in lost)
+                + "\n\nRenomme-les dans Son (Win + R, mmsys.cpl) : Propriétés › Général.")
 
     def add_effect(self, index: int) -> None:
         strip, host = self.strips[index], self._reaper

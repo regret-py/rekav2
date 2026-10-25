@@ -1,45 +1,63 @@
 """
 Noms des périphériques Windows de Voicemeeter.
 
-Voicemeeter crée ses périphériques Windows : les sorties virtuelles B1, B2, B3
-(« Voicemeeter Out B1 »… côté enregistrement, là où Discord et OBS prennent le
-micro) et les entrées virtuelles (« Voicemeeter Input », « AUX Input »,
-« VAIO3 Input » côté lecture). REKA leur donne ses propres noms : « REKA Micro »,
-« REKA Discord », « REKA Obs », et « REKA <nom de la strip> » pour les entrées.
+Voicemeeter crée ses périphériques Windows : les entrées virtuelles
+(« Voicemeeter Input », « AUX Input », « VAIO3 Input », côté lecture) et les
+sorties virtuelles (« Voicemeeter Out B1/B2/B3 », côté enregistrement, là où
+Discord et OBS prennent le micro). REKA leur donne ses noms : « REKA insert »,
+« REKA aux », « REKA VAIO3 », « REKA B1 », « REKA B2 », « REKA B3 ».
+Les autres (« Voicemeeter In 1…5 », « Out A1…A5 ») gardent leur nom.
 
 C'est le même renommage que Panneau de configuration › Son › Propriétés : le
 périphérique ne change pas, les applications gardent leur réglage.
 
-- Chaque périphérique est reconnu par le nom de son pilote (« VB-Audio
-  Voicemeeter AUX VAIO »), qui ne change pas quand on le renomme.
+Reconnaître un périphérique : toutes les sorties et entrées de Voicemeeter
+peuvent avoir le même pilote (« VB-Audio Voicemeeter VAIO »), qui ne suffit
+donc pas. On se fie, dans l'ordre, à :
+  1. son nom d'origine, donné par le pilote (nom de la broche, que le
+     renommage ne change pas) ;
+  2. son nom actuel, s'il est encore celui d'origine ;
+  3. ce que REKA a noté en le renommant (devices.json).
+Un périphérique non reconnu n'est jamais renommé, et deux périphériques
+reconnus comme le même ne le sont pas non plus.
+
 - Windows n'autorise le renommage qu'en administrateur : si REKA n'a pas le
   droit, il se relance une fois en administrateur avec --rename-devices (Windows
   demande l'autorisation), seulement quand un nom est à changer.
-- Option désactivée : les noms « REKA … » reprennent leur nom d'origine ; un nom
-  choisi à la main par l'utilisateur n'est pas touché.
+- Un périphérique au nom « REKA … » qui ne doit pas (ou plus) l'avoir reprend
+  son nom d'origine (option désactivée, ou renommé par erreur).
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-from core.app_volume import match_device
-from core.voicemeeter_ctrl import edition, strip_map
+from core import config
 
 log = logging.getLogger(__name__)
 
 PREFIX = "REKA "
 MAX_NAME = 40
-# Clés des périphériques : sorties B1..B3 (capture), entrées virtuelles in0..in2 (lecture)
+MEMORY_FILE = "devices.json"
+# Nom d'origine de chaque périphérique renommé : (nom, capture) → clé
 ORIGINAL_NAMES = {
-    "B1": "Voicemeeter Out B1", "B2": "Voicemeeter Out B2", "B3": "Voicemeeter Out B3",
-    "in0": "Voicemeeter Input", "in1": "Voicemeeter AUX Input", "in2": "Voicemeeter VAIO3 Input",
+    "in0": ("Voicemeeter Input", False),
+    "in1": ("Voicemeeter AUX Input", False),
+    "in2": ("Voicemeeter VAIO3 Input", False),
+    "B1": ("Voicemeeter Out B1", True),
+    "B2": ("Voicemeeter Out B2", True),
+    "B3": ("Voicemeeter Out B3", True),
 }
-DEFAULT_OUTPUT_NAMES = {"B1": "REKA Micro", "B2": "REKA Discord", "B3": "REKA Obs"}
+DEFAULT_NAMES = {
+    "in0": "REKA insert", "in1": "REKA aux", "in2": "REKA VAIO3",
+    "B1": "REKA B1", "B2": "REKA B2", "B3": "REKA B3",
+}
 
 # Propriétés Windows : nom court (celui qu'on renomme), nom complet, nom du pilote
 PKEY_DEVICE_DESC = ("{a45c254e-df1c-4efd-8020-67d146a850e0}", 2)
@@ -47,24 +65,34 @@ PKEY_FRIENDLY_NAME = ("{a45c254e-df1c-4efd-8020-67d146a850e0}", 14)
 PKEY_INTERFACE_NAME = ("{026e516e-b814-414b-83cd-856d6fef4822}", 2)
 E_ACCESSDENIED = -2147024891          # 0x80070005
 STGM_READWRITE = 2
-ERROR_CANCELLED = 1223               # l'utilisateur a refusé l'élévation
+CLSCTX_ALL = 23
 
 
 @dataclass
 class Endpoint:
-    key: str          # B1, in0…
-    name: str         # nom court actuel (« Voicemeeter Out B1 »)
+    id: str           # identifiant Windows du périphérique
+    capture: bool     # côté enregistrement (sorties B)
+    name: str         # nom court actuel (« Voicemeeter Out B1 », « REKA B1 »…)
+    original: str     # nom donné par le pilote (broche), "" si illisible
     interface: str    # nom du pilote (« VB-Audio Voicemeeter VAIO »)
     device: object = None   # IMMDevice (Windows)
 
 
-def endpoint_key(interface: str, capture: bool) -> str | None:
-    """Périphérique Voicemeeter d'après le nom de son pilote : la VAIO porte B1
-    et l'entrée virtuelle 1, l'AUX B2 et l'entrée 2, la VAIO3 B3 et l'entrée 3."""
-    for index in range(3):
-        if match_device(interface, index):
-            return f"B{index + 1}" if capture else f"in{index}"
+def _key_of(name: str, capture: bool) -> str | None:
+    lower = name.strip().lower()
+    for key, (original, is_capture) in ORIGINAL_NAMES.items():
+        if is_capture == capture and lower == original.lower():
+            return key
     return None
+
+
+def identify(endpoint: Endpoint, memory: dict[str, str]) -> str | None:
+    """Clé du périphérique (in0…in2, B1…B3), ou None s'il n'en a pas ou s'il
+    n'est pas reconnu avec certitude."""
+    if endpoint.original:
+        # Le pilote donne le nom d'origine : lui seul fait foi
+        return _key_of(endpoint.original, endpoint.capture)
+    return _key_of(endpoint.name, endpoint.capture) or memory.get(endpoint.id)
 
 
 def enabled(cfg: dict) -> bool:
@@ -72,43 +100,122 @@ def enabled(cfg: dict) -> bool:
 
 
 def wanted_names(cfg: dict) -> dict[str, str]:
-    """Nom voulu pour chaque périphérique Voicemeeter (option activée)."""
-    vm_cfg = cfg.get("voicemeeter", {})
-    custom = vm_cfg.get("device_names", {})
-    names = {key: str(custom.get(key) or default) for key, default in DEFAULT_OUTPUT_NAMES.items()}
-    ed = edition(cfg)
-    strip_names = cfg.get("ui", {}).get("strip_names", [])
-    for virtual in range(3):
-        names[f"in{virtual}"] = f"{PREFIX}Entrée {virtual + 1}"
-    for ui_index, vm_strip in enumerate(strip_map(cfg)):
-        virtual = vm_strip - ed.physical_strips
-        if 0 <= virtual < 3 and ui_index < len(strip_names) and str(strip_names[ui_index]).strip():
-            names[f"in{virtual}"] = PREFIX + str(strip_names[ui_index]).strip()
-    for key in [k for k in names if str(custom.get(k, "")).strip()]:
-        names[key] = str(custom[key]).strip()       # un nom donné dans config.json l'emporte
-    return {key: name[:MAX_NAME] for key, name in names.items()}
+    """Nom voulu pour chaque périphérique (voicemeeter.device_names peut les changer)."""
+    custom = cfg.get("voicemeeter", {}).get("device_names", {}) or {}
+    return {key: (str(custom.get(key) or "").strip() or default)[:MAX_NAME]
+            for key, default in DEFAULT_NAMES.items()}
 
 
-def plan(cfg: dict, endpoints: list[Endpoint]) -> list[tuple[Endpoint, str]]:
-    """Renommages à faire : vers les noms REKA (option activée), sinon retour au
-    nom d'origine des périphériques que REKA avait renommés."""
-    wanted = wanted_names(cfg) if enabled(cfg) else None
-    changes = []
+def plan(cfg: dict, endpoints: list[Endpoint],
+         memory: dict[str, str]) -> tuple[list[tuple[Endpoint, str, str | None]], list[Endpoint]]:
+    """(renommages à faire : (périphérique, nouveau nom, clé), périphériques au
+    nom REKA dont on ne sait pas retrouver le nom d'origine)."""
+    wanted = wanted_names(cfg) if enabled(cfg) else {}
+    # Un nom de broche partagé par plusieurs périphériques n'identifie rien
+    shared = Counter((e.original.lower(), e.capture) for e in endpoints if e.original)
     for endpoint in endpoints:
-        if wanted is not None:
-            target = wanted.get(endpoint.key)
+        if endpoint.original and shared[(endpoint.original.lower(), endpoint.capture)] > 1:
+            endpoint.original = ""
+    keys = {e.id: identify(e, memory) for e in endpoints}
+    claimed = Counter(k for k in keys.values() if k)
+    changes, lost = [], []
+    for endpoint in endpoints:
+        key = keys[endpoint.id]
+        if key and claimed[key] > 1:
+            log.warning("« %s » : plusieurs périphériques reconnus comme %s, aucun n'est renommé.",
+                        endpoint.name, key)
+            key = None
+        if key and key in wanted:
+            target = wanted[key]
         elif endpoint.name.startswith(PREFIX):
-            target = ORIGINAL_NAMES.get(endpoint.key)
+            # Nom REKA à retirer : on remet celui d'origine, si on le connaît
+            target = endpoint.original or (ORIGINAL_NAMES[key][0] if key else "")
+            if not target:
+                lost.append(endpoint)
+                continue
         else:
-            target = None
-        if target and target != endpoint.name:
-            changes.append((endpoint, target))
-    return changes
+            continue
+        if target != endpoint.name:
+            changes.append((endpoint, target, key))
+    return changes, lost
+
+
+# --------------------------------------------------------------------------- #
+# Mémoire des périphériques renommés (%APPDATA%/REKA/devices.json)
+# --------------------------------------------------------------------------- #
+def load_memory() -> dict[str, str]:
+    try:
+        data = json.loads((config.app_data_dir() / MEMORY_FILE).read_text(encoding="utf-8"))
+        return {str(k): str(v) for k, v in data.items() if v in ORIGINAL_NAMES} \
+            if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_memory(memory: dict[str, str]) -> None:
+    try:
+        (config.app_data_dir() / MEMORY_FILE).write_text(json.dumps(memory, indent=2),
+                                                         encoding="utf-8")
+    except OSError as exc:
+        log.warning("devices.json non écrit : %s", exc)
 
 
 # --------------------------------------------------------------------------- #
 # Windows (Core Audio)
 # --------------------------------------------------------------------------- #
+def _com_interfaces():
+    """IDeviceTopology / IConnector / IPart (absents de pycaw) : juste le début
+    de leur table de méthodes, dans l'ordre du SDK Windows."""
+    from ctypes import HRESULT, POINTER, c_int
+    from ctypes.wintypes import BOOL, LPWSTR, UINT
+
+    from comtypes import COMMETHOD, GUID, IUnknown
+
+    class IPart(IUnknown):
+        _iid_ = GUID("{AE2DE0E4-5BCA-4F2D-AA46-5D13F8FDB3A9}")
+        _methods_ = [COMMETHOD([], HRESULT, "GetName", (["out"], POINTER(LPWSTR), "name"))]
+
+    class IConnector(IUnknown):
+        _iid_ = GUID("{9C2C4058-23F5-41DE-877A-DF3AF236A09E}")
+
+    IConnector._methods_ = [
+        COMMETHOD([], HRESULT, "GetType", (["out"], POINTER(c_int), "type")),
+        COMMETHOD([], HRESULT, "GetDataFlow", (["out"], POINTER(c_int), "flow")),
+        COMMETHOD([], HRESULT, "ConnectTo", (["in"], POINTER(IConnector), "to")),
+        COMMETHOD([], HRESULT, "Disconnect"),
+        COMMETHOD([], HRESULT, "IsConnected", (["out"], POINTER(BOOL), "connected")),
+        COMMETHOD([], HRESULT, "GetConnectedTo", (["out"], POINTER(POINTER(IConnector)), "to")),
+    ]
+
+    class IDeviceTopology(IUnknown):
+        _iid_ = GUID("{2A07407E-6497-4A18-9787-32F79BD0D98F}")
+        _methods_ = [
+            COMMETHOD([], HRESULT, "GetConnectorCount", (["out"], POINTER(UINT), "count")),
+            COMMETHOD([], HRESULT, "GetConnector", (["in"], UINT, "index"),
+                      (["out"], POINTER(POINTER(IConnector)), "connector")),
+        ]
+
+    return IDeviceTopology, IPart
+
+
+def _pin_name(device, interfaces) -> str:
+    """Nom d'origine du périphérique : celui de la broche du pilote à laquelle il
+    est relié (le renommage dans Windows ne le change pas). "" si illisible."""
+    topology_type, part_type = interfaces
+    try:
+        topology = device.Activate(topology_type._iid_, CLSCTX_ALL, None)
+        topology = topology.QueryInterface(topology_type)
+        if topology.GetConnectorCount() < 1:
+            return ""
+        pin = topology.GetConnector(0).GetConnectedTo()
+        name = pin.QueryInterface(part_type).GetName() or ""
+    except Exception as exc:
+        log.debug("Nom de broche illisible : %s", exc)
+        return ""
+    # Une broche sans nom propre porte celui de sa catégorie (« Speakers »…)
+    return name.strip() if name.strip().lower().startswith("voicemeeter") else ""
+
+
 def _key(fmtid: str, pid: int):
     from comtypes import GUID
     from pycaw.api.mmdeviceapi.depend.structures import PROPERTYKEY
@@ -136,6 +243,7 @@ def list_endpoints() -> list[Endpoint]:
         from pycaw.api.mmdeviceapi import IMMDeviceEnumerator
         from pycaw.constants import CLSID_MMDeviceEnumerator, DEVICE_STATE, EDataFlow
 
+        interfaces = _com_interfaces()
         enumerator = comtypes.CoCreateInstance(CLSID_MMDeviceEnumerator, IMMDeviceEnumerator,
                                                comtypes.CLSCTX_INPROC_SERVER)
         found = []
@@ -144,10 +252,14 @@ def list_endpoints() -> list[Endpoint]:
             for i in range(collection.GetCount()):
                 device = collection.Item(i)
                 store = device.OpenPropertyStore(0)         # lecture
-                key = endpoint_key(_read(store, PKEY_INTERFACE_NAME), capture)
-                if key:
-                    found.append(Endpoint(key, _read(store, PKEY_DEVICE_DESC),
-                                          _read(store, PKEY_INTERFACE_NAME), device))
+                interface = _read(store, PKEY_INTERFACE_NAME)
+                if "voicemeeter" not in interface.lower():
+                    continue
+                found.append(Endpoint(str(device.GetId()), capture, _read(store, PKEY_DEVICE_DESC),
+                                      _pin_name(device, interfaces), interface, device))
+        for e in found:
+            log.debug("Périphérique Voicemeeter : « %s » (origine « %s », %s)", e.name,
+                      e.original or "?", "enregistrement" if e.capture else "lecture")
         return found
     except Exception as exc:
         log.warning("Périphériques Voicemeeter introuvables : %s", exc)
@@ -161,8 +273,8 @@ def _write(endpoint: Endpoint, name: str) -> None:
     from pycaw.api.mmdeviceapi.depend.structures import PROPVARIANT
 
     store = endpoint.device.OpenPropertyStore(STGM_READWRITE)
-    for pkey, text in ((PKEY_DEVICE_DESC, name),
-                       (PKEY_FRIENDLY_NAME, f"{name} ({endpoint.interface})" if endpoint.interface else name)):
+    full = f"{name} ({endpoint.interface})" if endpoint.interface else name
+    for pkey, text in ((PKEY_DEVICE_DESC, name), (PKEY_FRIENDLY_NAME, full)):
         value = PROPVARIANT()
         value.vt = VT_LPWSTR
         value.union.pwszVal = text
@@ -175,20 +287,26 @@ def _write(endpoint: Endpoint, name: str) -> None:
     store.Commit()
 
 
-def rename(changes: list[tuple[Endpoint, str]]) -> tuple[int, bool]:
-    """Applique les renommages : (nombre faits, accès refusé ?)."""
+def rename(changes: list[tuple[Endpoint, str, str | None]]) -> tuple[int, bool]:
+    """Applique les renommages et note les périphériques renommés : (nombre
+    faits, accès refusé ?)."""
     done, denied = 0, False
-    for endpoint, name in changes:
+    memory = load_memory()
+    for endpoint, name, key in changes:
         try:
             _write(endpoint, name)
-            done += 1
-            log.info("Périphérique « %s » renommé en « %s ».", endpoint.name, name)
         except Exception as exc:
-            if getattr(exc, "hresult", None) == E_ACCESSDENIED or "accès" in str(exc).lower() \
-                    or "access" in str(exc).lower():
+            if getattr(exc, "hresult", None) == E_ACCESSDENIED:
                 denied = True
             else:
                 log.warning("Renommage de « %s » impossible : %s", endpoint.name, exc)
+            continue
+        done += 1
+        if key:
+            memory[endpoint.id] = key
+        log.info("Périphérique « %s » renommé en « %s ».", endpoint.name, name)
+    if done:
+        save_memory(memory)
     return done, denied
 
 
@@ -214,7 +332,8 @@ def launch_elevated() -> bool:
 
 def run_elevated(cfg: dict) -> int:
     """--rename-devices : renomme puis quitte (instance lancée en administrateur)."""
-    done, denied = rename(plan(cfg, list_endpoints()))
+    changes, _lost = plan(cfg, list_endpoints(), load_memory())
+    done, denied = rename(changes)
     log.info("Renommage en administrateur : %d périphérique(s)%s.", done,
              ", accès refusé" if denied else "")
     return 1 if denied else 0
@@ -227,13 +346,18 @@ class DeviceRenamer:
         self._cfg = cfg
         self._asked = False      # une seule demande d'élévation par session
 
-    def apply(self) -> None:
+    def apply(self) -> list[str]:
+        """Renomme ce qui doit l'être ; renvoie les noms REKA dont l'origine est
+        introuvable (à renommer à la main)."""
         if sys.platform != "win32":
-            return
-        changes = plan(self._cfg, list_endpoints())
-        if not changes:
-            return
-        _done, denied = rename(changes)
-        if denied and not self._asked:
-            self._asked = True
-            launch_elevated()
+            return []
+        changes, lost = plan(self._cfg, list_endpoints(), load_memory())
+        if changes:
+            _done, denied = rename(changes)
+            if denied and not self._asked:
+                self._asked = True
+                launch_elevated()
+        if lost:
+            log.warning("Périphériques au nom REKA d'origine inconnue : %s",
+                        ", ".join(e.name for e in lost))
+        return [e.name for e in lost]

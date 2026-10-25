@@ -156,17 +156,23 @@ OBS ou les jeux affichent des noms clairs :
 
 | Périphérique Voicemeeter | Nom REKA |
 |---|---|
-| Voicemeeter Out B1 (enregistrement) | **REKA Micro** |
-| Voicemeeter Out B2 | **REKA Discord** |
-| Voicemeeter Out B3 (Potato) | **REKA Obs** |
-| Voicemeeter Input / AUX Input / VAIO3 Input (lecture) | **REKA** + nom de la strip (REKA Appels, REKA Bureau…) |
+| Voicemeeter Input (lecture) | **REKA insert** |
+| Voicemeeter AUX Input | **REKA aux** |
+| Voicemeeter VAIO3 Input (Potato) | **REKA VAIO3** |
+| Voicemeeter Out B1 / B2 / B3 (enregistrement) | **REKA B1** / **REKA B2** / **REKA B3** |
 
-C'est le même périphérique (seul le nom change) : les applications gardent leur réglage.
-Windows exige les droits administrateur pour renommer : la première fois, REKA demande
-l'autorisation (une fenêtre Windows), puis plus rien tant que les noms sont bons. Renommer
-une strip renomme aussi son périphérique. Autres noms : `voicemeeter.device_names` dans
-`config.json` (ex. `{"B1": "Mon Micro"}`). Décocher ⚙ → Audio → *Renommer les périphériques
-Voicemeeter* remet les noms d'origine.
+Les autres (*Voicemeeter In 1…5*, *Out A1…A5*) gardent leur nom. C'est le même
+périphérique (seul le nom change) : les applications gardent leur réglage.
+
+- Chaque périphérique est reconnu par le nom que lui donne le pilote de Voicemeeter (pas
+  par le nom du pilote, commun à tous). Un périphérique non reconnu n'est jamais renommé.
+- Windows exige les droits administrateur pour renommer : la première fois, REKA demande
+  l'autorisation (une fenêtre Windows), puis plus rien tant que les noms sont bons.
+- Autres noms : `voicemeeter.device_names` dans `config.json` (ex. `{"B1": "REKA Micro"}`,
+  clés `in0` `in1` `in2` `B1` `B2` `B3`). Décocher ⚙ → Audio → *Renommer les périphériques
+  Voicemeeter* remet les noms d'origine.
+- Un nom « REKA … » donné par erreur (version précédente) reprend son nom d'origine au
+  démarrage ; si REKA ne peut pas le retrouver, il affiche la liste à renommer à la main.
 
 ## Mises à jour
 

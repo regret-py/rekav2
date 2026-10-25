@@ -613,40 +613,81 @@ def test_app_volume_device_matching_and_demo():
 
 
 # ------------------------------------------------ noms Windows des périphériques
-def test_device_names_plan_renames_and_restores():
-    from core.device_names import Endpoint, endpoint_key, plan, wanted_names
+def _vm_endpoint(ident, capture, name, original=""):
+    from core.device_names import Endpoint
 
-    assert endpoint_key("VB-Audio Voicemeeter VAIO", capture=True) == "B1"
-    assert endpoint_key("VB-Audio Voicemeeter AUX VAIO", capture=True) == "B2"
-    assert endpoint_key("VB-Audio Voicemeeter VAIO3", capture=True) == "B3"
-    assert endpoint_key("VB-Audio Voicemeeter AUX VAIO", capture=False) == "in1"
-    assert endpoint_key("Realtek High Definition Audio", capture=True) is None
+    return Endpoint(ident, capture, name, original, "VB-Audio Voicemeeter VAIO")
 
-    cfg = {"voicemeeter": {"kind": "potato"},
-           "ui": {"strip_names": ["Microphone", "Musique", "Appels", "Bureau", "Autres 1", "Autres 2"]}}
-    names = wanted_names(cfg)
-    assert names["B1"] == "REKA Micro" and names["B2"] == "REKA Discord" and names["B3"] == "REKA Obs"
-    assert names["in0"] == "REKA Appels" and names["in1"] == "REKA Bureau" and names["in2"] == "REKA Autres 2"
 
-    endpoints = [Endpoint("B1", "Voicemeeter Out B1", "VB-Audio Voicemeeter VAIO"),
-                 Endpoint("B2", "REKA Discord", "VB-Audio Voicemeeter AUX VAIO"),
-                 Endpoint("in2", "Mon câble", "VB-Audio Voicemeeter VAIO3")]
-    assert [(e.key, n) for e, n in plan(cfg, endpoints)] == [("B1", "REKA Micro"), ("in2", "REKA Autres 2")]
+def test_device_names_one_driver_for_all_devices():
+    """Voicemeeter récent : toutes ses entrées/sorties ont le même pilote."""
+    from core.device_names import plan
 
-    # Nom choisi dans config.json
-    cfg["voicemeeter"]["device_names"] = {"B1": "Mon Micro"}
-    assert plan(cfg, endpoints)[0][1] == "Mon Micro"
+    cfg = {"voicemeeter": {"kind": "potato"}}
+    endpoints = [_vm_endpoint("r0", False, "Voicemeeter Input"),
+                 _vm_endpoint("r1", False, "Voicemeeter AUX Input"),
+                 _vm_endpoint("r2", False, "Voicemeeter VAIO3 Input"),
+                 _vm_endpoint("r3", False, "Voicemeeter In 1"),
+                 _vm_endpoint("c0", True, "Voicemeeter Out B1"),
+                 _vm_endpoint("c1", True, "Voicemeeter Out B2"),
+                 _vm_endpoint("c2", True, "Voicemeeter Out B3"),
+                 _vm_endpoint("c3", True, "Voicemeeter Out A1")]
+    changes, lost = plan(cfg, endpoints, {})
+    assert [(e.id, name) for e, name, _key in changes] == [
+        ("r0", "REKA insert"), ("r1", "REKA aux"), ("r2", "REKA VAIO3"),
+        ("c0", "REKA B1"), ("c1", "REKA B2"), ("c2", "REKA B3")]
+    assert lost == []
 
-    # Option désactivée : seuls les noms REKA reviennent à l'origine
+    # Déjà renommés : reconnus par ce que REKA a noté, rien à refaire
+    renamed = [_vm_endpoint(e.id, e.capture, n) for e, n, _k in changes]
+    memory = {e.id: k for e, _n, k in changes}
+    assert plan(cfg, renamed, memory) == ([], [])
+
+    # Option désactivée : noms d'origine
     cfg["voicemeeter"]["rename_devices"] = False
-    assert [(e.key, n) for e, n in plan(cfg, endpoints)] == [("B2", "Voicemeeter Out B2")]
+    back = [(e.id, n) for e, n, _k in plan(cfg, renamed, memory)[0]]
+    assert ("r1", "Voicemeeter AUX Input") in back and ("c0", "Voicemeeter Out B1") in back
+
+
+def test_device_names_repairs_wrong_names_from_pin_names():
+    """Version précédente : toutes les entrées VAIO renommées « REKA jeux »."""
+    from core.device_names import plan
+
+    cfg = {"voicemeeter": {"kind": "potato", "device_names": {"B2": "Mon Discord"}}}
+    endpoints = [_vm_endpoint("r0", False, "REKA jeux", "Voicemeeter Input"),
+                 _vm_endpoint("r1", False, "REKA jeux", "Voicemeeter AUX Input"),
+                 _vm_endpoint("r3", False, "REKA jeux", "Voicemeeter In 1"),
+                 _vm_endpoint("c1", True, "REKA Micro", "Voicemeeter Out B2"),
+                 _vm_endpoint("c3", True, "REKA Micro", "Voicemeeter Out A1")]
+    changes, lost = plan(cfg, endpoints, {})
+    assert [(e.id, n) for e, n, _k in changes] == [
+        ("r0", "REKA insert"), ("r1", "REKA aux"), ("r3", "Voicemeeter In 1"),
+        ("c1", "Mon Discord"), ("c3", "Voicemeeter Out A1")]
+    assert lost == []
+
+
+def test_device_names_never_guesses():
+    from core.device_names import plan
+
+    cfg = {"voicemeeter": {"kind": "potato"}}
+    # Nom d'origine illisible : un nom REKA inconnu est signalé, pas deviné
+    changes, lost = plan(cfg, [_vm_endpoint("r0", False, "REKA jeux")], {})
+    assert changes == [] and [e.id for e in lost] == ["r0"]
+    # Deux périphériques notés comme le même : aucun n'est renommé
+    endpoints = [_vm_endpoint("c0", True, "Voicemeeter Out B1"), _vm_endpoint("c9", True, "Micro")]
+    assert plan(cfg, endpoints, {"c9": "B1"})[0] == []
+    # Nom de broche commun à plusieurs périphériques : ignoré
+    endpoints = [_vm_endpoint("c0", True, "Voicemeeter Out B1", "Voicemeeter VAIO"),
+                 _vm_endpoint("c1", True, "Voicemeeter Out B2", "Voicemeeter VAIO")]
+    assert [n for _e, n, _k in plan(cfg, endpoints, {})[0]] == ["REKA B1", "REKA B2"]
 
 
 def test_apo_finds_renamed_virtual_input():
     from core.apo_ctrl import Endpoint, resolve_device
 
-    endpoints = [Endpoint("REKA Appels (VB-Audio Voicemeeter VAIO)", "{aaa}", False),
-                 Endpoint("REKA Micro (VB-Audio Voicemeeter VAIO)", "{bbb}", True),
-                 Endpoint("REKA Bureau (VB-Audio Voicemeeter AUX VAIO)", "{ccc}", False)]
+    endpoints = [Endpoint("REKA insert (VB-Audio Voicemeeter VAIO)", "{aaa}", False),
+                 Endpoint("REKA B1 (VB-Audio Voicemeeter VAIO)", "{bbb}", True),
+                 Endpoint("REKA aux (VB-Audio Voicemeeter VAIO)", "{ccc}", False),
+                 Endpoint("Voicemeeter In 1 (VB-Audio Voicemeeter VAIO)", "{ddd}", False)]
     assert resolve_device("Voicemeeter Input", endpoints)[0] == "{aaa}"
     assert resolve_device("Voicemeeter AUX Input", endpoints)[0] == "{ccc}"
