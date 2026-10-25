@@ -742,6 +742,13 @@ class SettingsDialog(QDialog):
         self.auto_update.setChecked(bool(update_cfg.get("check_on_start", True)))
         self.auto_update.toggled.connect(lambda on: update_cfg.__setitem__("check_on_start", on))
         box.addWidget(self.auto_update)
+        self.auto_install = QCheckBox("Installer les mises à jour directement (sans rien demander)")
+        self.auto_install.setChecked(bool(update_cfg.get("auto_install", True)))
+        self.auto_install.setToolTip("Au lancement, REKA installe la nouvelle version et redémarre "
+                                     "dessus ; trouvée en cours de route, elle sert au prochain "
+                                     "lancement.")
+        self.auto_install.toggled.connect(lambda on: update_cfg.__setitem__("auto_install", on))
+        box.addWidget(self.auto_install)
         row = QHBoxLayout()
         self.update_status = _hint("")
         row.addWidget(self.update_status, 1)

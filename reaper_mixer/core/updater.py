@@ -11,6 +11,10 @@ l'exe en ligne (numéro de build, taille, empreinte SHA-256, notes).
   puis le met à la place de l'exe en cours : Windows interdit d'écraser un exe
   qui tourne mais permet de le renommer (REKA.exe → REKA.old.exe). REKA
   redémarre ensuite sur le nouvel exe, qui supprime l'ancien.
+- Mise à jour directe (update.auto_install, par défaut) : au lancement, avant
+  les moteurs, REKA installe la nouvelle version et redémarre dessus sans rien
+  demander (AutoUpdater) ; trouvée en cours de route, elle est installée en
+  arrière-plan et sert au prochain lancement.
 
 En développement (python main.py), pas de build_info.json : pas de vérification.
 """
@@ -39,6 +43,7 @@ BUILD_INFO_FILE = "build_info.json"
 VERSION_FILE = "version.json"
 OLD_SUFFIX = ".old.exe"
 FETCH_TIMEOUT_S = 10.0
+STARTUP_FETCH_TIMEOUT_S = 4.0    # au lancement : un PC hors ligne n'attend pas longtemps
 DOWNLOAD_TIMEOUT_S = 30.0
 CHUNK = 64 * 1024
 MAX_VERSION_FILE = 64 * 1024
@@ -234,6 +239,11 @@ def cleanup_previous(current: Path | None = None) -> bool:
     return done
 
 
+def auto_install(cfg: dict) -> bool:
+    """Mise à jour directe, sans rien demander (update.auto_install)."""
+    return bool(cfg.get("update", {}).get("auto_install", True))
+
+
 def can_self_update() -> bool:
     """Remplacement automatique possible : exe PyInstaller (pas en développement)."""
     return bool(getattr(sys, "frozen", False)) and Path(sys.executable).suffix.lower() == ".exe"
@@ -313,3 +323,52 @@ class UpdateDownloader(QObject):
             self.failed.emit(str(exc))
             return
         self.finished.emit(path)
+
+
+class AutoUpdater(QObject):
+    """Mise à jour directe, en arrière-plan : vérifie, télécharge et vérifie le
+    nouvel exe. Sans mise à jour, ou en cas d'erreur (réseau…), émet `none` :
+    REKA démarre alors normalement."""
+
+    status = Signal(str)              # texte de progression
+    ready = Signal(object, object)    # UpdateInfo, Path de l'exe vérifié
+    none = Signal()
+
+    def __init__(self, cfg: dict, build: BuildInfo | None,
+                 timeout: float = STARTUP_FETCH_TIMEOUT_S, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._cfg = cfg
+        self._build = build
+        self._timeout = timeout
+
+    def start(self) -> bool:
+        """False si impossible (développement, pas d'adresse) : rien n'est émis."""
+        url = version_url(self._cfg, self._build)
+        if url is None or self._build is None:
+            return False
+        threading.Thread(target=self._run, args=(url,), name="update-auto", daemon=True).start()
+        return True
+
+    def _run(self, url: str) -> None:
+        try:
+            update = fetch_update(url, self._timeout)
+            skipped = int(self._cfg.get("update", {}).get("skipped_build", 0) or 0)
+            if not is_newer(update, self._build, skipped):
+                self.none.emit()
+                return
+            log.info("Mise à jour directe : %s (en cours : %s)",
+                     update.describe(), self._build.describe())
+            shown = [-1]
+
+            def progress(received: int, total: int) -> None:
+                percent = received * 100 // max(1, total)
+                if percent != shown[0]:
+                    shown[0] = percent
+                    self.status.emit(f"Mise à jour vers REKA {update.version} : {percent} %")
+
+            path = download(update, update_dir() / f"REKA-{update.build}.exe", progress)
+        except UpdateError as exc:
+            log.info("Mise à jour directe impossible : %s", exc)
+            self.none.emit()
+            return
+        self.ready.emit(update, path)

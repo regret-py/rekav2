@@ -563,6 +563,53 @@ def test_update_banner_and_skip(qapp, updating):
     assert window.master.update_button.isHidden()        # version ignorée : plus de pill
 
 
+def test_update_installed_directly_in_background(qapp, updating, monkeypatch):
+    """Mise à jour directe en cours de route : installée sans rien demander, la
+    pill propose ensuite de redémarrer."""
+    from pathlib import Path
+
+    from PySide6.QtCore import QObject, Signal
+
+    import ui.main_window as main_window
+
+    window, updater, update = updating
+    installed, asked = [], []
+
+    class Downloader(QObject):
+        finished = Signal(object)
+        failed = Signal(str)
+
+        def __init__(self, info):
+            super().__init__()
+
+        def start(self):
+            self.finished.emit(Path(f"REKA-{update.build}.exe"))
+
+    monkeypatch.setattr(main_window, "UpdateDownloader", Downloader)
+    monkeypatch.setattr(main_window, "can_self_update", lambda: True)
+    monkeypatch.setattr(main_window, "install", lambda path, current: installed.append(path.name))
+    monkeypatch.setattr(window, "_persist", True)
+    updater.available.emit(update)
+    pump(qapp, 0.05)
+    assert installed == ["REKA-7.exe"] and window._installed is update
+    assert not window.master.update_button.isHidden()
+    updater.available.emit(update)                       # même version : rien à refaire
+    pump(qapp, 0.05)
+    assert installed == ["REKA-7.exe"]
+
+    monkeypatch.setattr(QMessageBox, "question",
+                        lambda *args: asked.append(args[2]) or QMessageBox.StandardButton.No)
+    QTest.mouseClick(window.master.update_button, LEFT)
+    assert asked and "0.6.0" in asked[0]
+
+    # Option désactivée : la pill demande, comme avant
+    window._installed = window._update = None
+    window._cfg["update"]["auto_install"] = False
+    updater.available.emit(update)
+    pump(qapp, 0.05)
+    assert installed == ["REKA-7.exe"] and window._update is update
+
+
 def test_about_tab_update_check(qapp, updating):
     from ui.settings_dialog import SettingsDialog
 

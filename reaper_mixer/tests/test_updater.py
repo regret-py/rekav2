@@ -190,3 +190,36 @@ def test_update_downloader(qapp, server, appdata):
         if done:
             break
     assert done and done[0].read_bytes() == exe and progress[-1] == len(exe)
+
+
+def test_auto_updater(qapp, server, cfg):
+    """Mise à jour directe : prête si plus récente, sinon (ou en cas d'erreur) rien."""
+    from core.updater import AutoUpdater
+
+    base, files = server
+    exe = publish(base, files, build=7)
+    cfg["update"]["url"] = f"{base}/version.json"
+
+    def run(build):
+        events = []
+        auto = AutoUpdater(cfg, build_info(build))
+        auto.ready.connect(lambda info, path: events.append(("ready", info.build,
+                                                             path.read_bytes() == exe)))
+        auto.none.connect(lambda: events.append(("none",)))
+        assert auto.start()
+        for _ in range(100):
+            pump(qapp, 0.05)
+            if events:
+                break
+        return events
+
+    assert run(5) == [("ready", 7, True)]
+    assert run(7) == [("none",)]                         # déjà à jour
+    cfg["update"]["skipped_build"] = 7
+    assert run(5) == [("none",)]                         # version ignorée
+    cfg["update"]["skipped_build"] = 0
+    files.pop("/REKA.exe")
+    assert run(5) == [("none",)]                         # téléchargement impossible
+    files.pop("/version.json")
+    assert run(5) == [("none",)]                         # hors ligne
+    assert not AutoUpdater(cfg, None).start()            # développement : rien

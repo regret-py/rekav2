@@ -153,8 +153,16 @@ Si tes périphériques ont d'autres noms, indique-les dans `config.json`
 
 ## Mises à jour
 
-REKA vérifie au démarrage (puis toutes les 6 heures) si une nouvelle version est en ligne.
-Si oui, une pill **Mise à jour** apparaît dans le panneau Master :
+REKA se met à jour **directement** : au lancement, avant de démarrer Voicemeeter et
+REAPER, il cherche une nouvelle version ; s'il y en a une, il la télécharge, vérifie
+qu'elle est complète (empreinte SHA-256), remplace `REKA.exe` et redémarre dessus, sans
+rien demander. Une version publiée pendant que REKA tourne est installée en arrière-plan,
+sans couper le son : elle s'ouvre au prochain lancement (pill **Mise à jour** pour
+redémarrer tout de suite). Hors ligne, REKA démarre normalement après 4 secondes au plus.
+
+Option ⚙ → **À propos** → *Installer les mises à jour directement* (activée par défaut).
+Décochée, REKA vérifie au démarrage (puis toutes les 6 heures) et une pill **Mise à jour**
+apparaît dans le panneau Master :
 
 - **Mettre à jour** : REKA télécharge le nouvel exe, vérifie qu'il est complet (empreinte
   SHA-256), le met à la place de l'ancien puis redémarre dessus. Réglages et projet REAPER

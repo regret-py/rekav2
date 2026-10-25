@@ -28,7 +28,8 @@ from core.app_volume import AppVolumeBackend, NullAppVolumes
 from core.effects import HOST_APO, HOST_NONE, HOST_REAPER
 from core.media import MediaBackend, NullMedia
 from core.process_manager import is_blank_project, reaper_project
-from core.updater import UpdateChecker, UpdateInfo
+from core.updater import (UpdateChecker, UpdateDownloader, UpdateError, UpdateInfo, auto_install,
+                          can_self_update, install)
 from core.voicemeeter_ctrl import DEFAULT_ROUTING, MixerLevels, MixerParams
 from ui import styles
 from ui.app_mixer import AppMixerPopup
@@ -74,9 +75,11 @@ def restart_command() -> tuple[str, list[str]]:
     return sys.executable, [str(Path(sys.argv[0]).resolve()), "--restart"]
 
 
-def launch_restart() -> bool:
-    """Lance la nouvelle instance de REKA (détachée) ; l'appelant quitte ensuite."""
+def launch_restart(extra: tuple[str, ...] = ()) -> bool:
+    """Lance la nouvelle instance de REKA (détachée), avec les arguments `extra` ;
+    l'appelant quitte ensuite."""
     program, args = restart_command()
+    args = [*args, *extra]
     # Exe PyInstaller « onefile » : sans cette variable, la nouvelle instance
     # se croirait un sous-processus de celle-ci et réutiliserait son dossier
     # temporaire, supprimé dès que cette instance se ferme.
@@ -207,6 +210,8 @@ class MainWindow(QMainWindow):
         self._media = media or NullMedia()
         self._updater = updater
         self._update: UpdateInfo | None = None
+        self._installed: UpdateInfo | None = None     # installée en arrière-plan (prochain lancement)
+        self._downloader: UpdateDownloader | None = None
         self._app_mixer: AppMixerPopup | None = None
         self._params: MixerParams | None = None
         self._vm_ok = True
@@ -506,6 +511,42 @@ class MainWindow(QMainWindow):
         skipped = int(self._cfg.get("update", {}).get("skipped_build", 0) or 0)
         if update.build == skipped and self._update is None:
             return
+        if self._installed is not None and self._installed.build >= update.build:
+            return
+        if self._persist and auto_install(self._cfg) and can_self_update():
+            self._install_in_background(update)
+            return
+        self._notify_update(update)
+
+    def _install_in_background(self, update: UpdateInfo) -> None:
+        """Mise à jour directe en cours de route : le nouvel exe remplace l'ancien
+        sans couper le son ; il sert au prochain lancement de REKA."""
+        if self._downloader is not None:
+            return
+        self._downloader = UpdateDownloader(update)
+
+        def downloaded(path: Path) -> None:
+            self._downloader = None
+            try:
+                install(path, Path(sys.executable))
+            except UpdateError as exc:
+                log.warning("Mise à jour directe non installée : %s", exc)
+                self._notify_update(update)
+                return
+            self._installed = self._update = update
+            self.master.set_update(update.version)
+            self.toast.show_message(f"REKA {update.version} est installée : elle s'ouvrira au "
+                                    "prochain lancement (« Mise à jour » pour redémarrer).")
+
+        def failed(_message: str) -> None:
+            self._downloader = None
+            self._notify_update(update)
+
+        self._downloader.finished.connect(downloaded)
+        self._downloader.failed.connect(failed)
+        self._downloader.start()
+
+    def _notify_update(self, update: UpdateInfo) -> None:
         first = self._update is None or self._update.build != update.build
         self._update = update
         self.master.set_update(update.version)
@@ -517,6 +558,14 @@ class MainWindow(QMainWindow):
                                        self.windowIcon(), 5000)
 
     def open_update(self) -> None:
+        if self._installed is not None:
+            answer = QMessageBox.question(
+                self, config.APP_NAME,
+                f"REKA {self._installed.version} est déjà installée.\n"
+                "Redémarrer REKA maintenant pour l'utiliser ? (le son est coupé quelques secondes)")
+            if answer == QMessageBox.StandardButton.Yes:
+                self.restart_app()
+            return
         # Mise à jour signalée, ou trouvée par une recherche manuelle (même ignorée)
         update = self._update or (self._updater.latest if self._updater is not None else None)
         if update is None:

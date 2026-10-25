@@ -53,7 +53,8 @@ from core.process_manager import (AppNotInstalledError, OtherEditionRunningError
                                   ProcessManagerError, StartupAborted,
                                   installed_voicemeeter_kinds, reaper_project)
 from core.effects import HOST_REAPER, EffectsHost, create_host
-from core.updater import UpdateChecker, cleanup_previous, load_build_info
+from core.updater import (AutoUpdater, UpdateChecker, UpdateError, auto_install, can_self_update,
+                          cleanup_previous, install, load_build_info)
 from core.voicemeeter_ctrl import EDITIONS, VoicemeeterController, edition
 from ui import styles
 from ui.main_window import MainWindow, launch_restart
@@ -348,7 +349,8 @@ class StartupWorker(QThread):
 class MixerApp:
     """Orchestre démarrage, fenêtre principale et arrêt."""
 
-    def __init__(self, qt_app: QApplication, cfg: dict, log_path: Path) -> None:
+    def __init__(self, qt_app: QApplication, cfg: dict, log_path: Path,
+                 check_updates: bool = True) -> None:
         self._qt = qt_app
         self._cfg = cfg
         self._log_path = log_path
@@ -361,13 +363,47 @@ class MixerApp:
         self._window: MainWindow | None = None
         self._project: str | None = None   # None = projet par défaut
         self._stopped = False
+        self._check_updates = check_updates   # False juste après une mise à jour directe
+        self._auto_update: AutoUpdater | None = None
 
     def start(self) -> None:
         if (self._host.has_projects
                 and self._cfg.get("reaper", {}).get("ask_project_on_start", False)):
             self._ask_project()
         self._splash.show()
-        self._boot()
+        if not self._update_first():
+            self._boot()
+
+    def _update_first(self) -> bool:
+        """Mise à jour directe, avant de lancer les moteurs : le nouvel exe
+        remplace l'ancien et REKA redémarre dessus sans rien demander.
+        False : pas de vérification, on démarre tout de suite."""
+        update_cfg = self._cfg.get("update", {})
+        if not (self._check_updates and auto_install(self._cfg) and can_self_update()
+                and update_cfg.get("check_on_start", True)):
+            return False
+        self._auto_update = AutoUpdater(self._cfg, self._updater.build)
+        self._auto_update.status.connect(self._splash.set_status)
+        self._auto_update.ready.connect(self._install_and_restart)
+        self._auto_update.none.connect(self._boot)
+        if not self._auto_update.start():
+            return False
+        self._splash.set_status("Recherche de mise à jour…")
+        return True
+
+    def _install_and_restart(self, update, path: Path) -> None:
+        try:
+            install(path, Path(sys.executable))
+        except UpdateError as exc:
+            log.warning("Mise à jour directe non installée : %s", exc)
+            self._boot()
+            return
+        self._splash.set_status(f"REKA {update.version} installée : redémarrage…")
+        # --updated : la nouvelle instance ne recherche pas de mise à jour (pas de boucle)
+        if not launch_restart(("--updated",)):
+            self._boot()          # le nouvel exe servira au prochain lancement
+            return
+        self._qt.quit()
 
     def _ask_project(self) -> None:
         """Choix du projet REAPER avant de lancer les moteurs (option « demander
@@ -675,6 +711,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--setup", action="store_true")
     parser.add_argument("--selftest", metavar="IMAGE")
     parser.add_argument("--restart", action="store_true")  # relance depuis les réglages
+    parser.add_argument("--updated", action="store_true")  # relance après une mise à jour directe
     args, _qt_args = parser.parse_known_args(argv[1:])
     return args
 
@@ -941,7 +978,7 @@ def main() -> int:
             return 0
         save_config_quietly(cfg)
 
-    mixer = MixerApp(app, cfg, log_path)
+    mixer = MixerApp(app, cfg, log_path, check_updates=not args.updated)
     server = listen_for_show_requests(mixer.show_window)
     # Fermeture : plus de réponse aux nouveaux lancements (ils attendront le verrou)
     app.aboutToQuit.connect(server.close)

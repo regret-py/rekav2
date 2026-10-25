@@ -31,6 +31,7 @@
   },
   "update": {
     "check_on_start": true,
+    "auto_install": true,
     "interval_hours": 6,
     "skipped_build": 0,
     "url": ""
