@@ -391,16 +391,6 @@ class SettingsDialog(QDialog):
         self.manage_routing.setChecked(bool(reaper_cfg.get("manage_routing", True)))
         self.manage_routing.toggled.connect(lambda on: self._set_option("reaper", "manage_routing", on))
         box.addWidget(self.manage_routing)
-        self.rename_devices = QCheckBox(
-            "Renommer les périphériques Voicemeeter dans Windows (REKA insert, REKA B1…)")
-        self.rename_devices.setChecked(bool(vm_cfg.get("rename_devices", True)))
-        self.rename_devices.setToolTip(
-            "Voicemeeter Input, AUX Input, VAIO3 Input : REKA insert, REKA aux, REKA VAIO3 ; "
-            "Out B1, B2, B3 : REKA B1, REKA B2, REKA B3. Décoché : noms d'origine. Windows "
-            "demande une fois l'autorisation administrateur.")
-        self.rename_devices.toggled.connect(
-            lambda on: self._set_option("voicemeeter", "rename_devices", on))
-        box.addWidget(self.rename_devices)
         self.show_vm = QCheckBox("Afficher la fenêtre de Voicemeeter pendant les réglages")
         self.show_vm.toggled.connect(lambda on: self._show_engine("voicemeeter", on))
         box.addWidget(self.show_vm)

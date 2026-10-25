@@ -149,31 +149,6 @@ correspondante dans l'application ou dans Windows (Paramètres › Son › Méla
 Si tes périphériques ont d'autres noms, indique-les dans `config.json`
 (`voicemeeter.app_devices`, un morceau de nom par entrée virtuelle).
 
-## Noms des périphériques dans Windows
-
-REKA renomme automatiquement les périphériques Windows de Voicemeeter, pour que Discord,
-OBS ou les jeux affichent des noms clairs :
-
-| Périphérique Voicemeeter | Nom REKA |
-|---|---|
-| Voicemeeter Input (lecture) | **REKA insert** |
-| Voicemeeter AUX Input | **REKA aux** |
-| Voicemeeter VAIO3 Input (Potato) | **REKA VAIO3** |
-| Voicemeeter Out B1 / B2 / B3 (enregistrement) | **REKA B1** / **REKA B2** / **REKA B3** |
-
-Les autres (*Voicemeeter In 1…5*, *Out A1…A5*) gardent leur nom. C'est le même
-périphérique (seul le nom change) : les applications gardent leur réglage.
-
-- Chaque périphérique est reconnu par le nom que lui donne le pilote de Voicemeeter (pas
-  par le nom du pilote, commun à tous). Un périphérique non reconnu n'est jamais renommé.
-- Windows exige les droits administrateur pour renommer : la première fois, REKA demande
-  l'autorisation (une fenêtre Windows), puis plus rien tant que les noms sont bons.
-- Autres noms : `voicemeeter.device_names` dans `config.json` (ex. `{"B1": "REKA Micro"}`,
-  clés `in0` `in1` `in2` `B1` `B2` `B3`). Décocher ⚙ → Audio → *Renommer les périphériques
-  Voicemeeter* remet les noms d'origine.
-- Un nom « REKA … » donné par erreur (version précédente) reprend son nom d'origine au
-  démarrage ; si REKA ne peut pas le retrouver, il affiche la liste à renommer à la main.
-
 ## Mises à jour
 
 REKA vérifie au démarrage (puis toutes les 6 heures) si une nouvelle version est en ligne.
