@@ -33,6 +33,7 @@ class FxPill(QWidget):
         self._hover = False
         self._pressed = False
         self._latency_ms: float | None = None
+        self.color_scope: int | None = None     # canal (couleur personnalisée)
         self.setFixedHeight(PILL_HEIGHT)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -65,13 +66,15 @@ class FxPill(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = QRectF(0.5, 0.5, self.width() - 1, self.height() - 1)
 
+        custom = styles.element_color("fx_pill", self.color_scope)
         if self._open:
-            border = styles.color(styles.GREEN_NEON, 0.9)
+            border = styles.color(custom or styles.GREEN_NEON, 0.9)
         elif self._hover:
-            border = styles.color(styles.GREEN_BRIGHT, 0.55)
+            border = styles.color(styles.accent_bright("fx_pill", self.color_scope), 0.55)
         else:
-            border = QColor(styles.PILL_BORDER)
-        fill = QColor(styles.PILL_BG).lighter(125 if self._hover else 100)
+            border = QColor(styles.mix(styles.PILL_BORDER, custom, 0.55) if custom else styles.PILL_BORDER)
+        base = styles.mix(styles.PILL_BG, custom, 0.3) if custom else styles.PILL_BG
+        fill = QColor(base).lighter(125 if self._hover else 100)
         p.setPen(QPen(border, 1))
         p.setBrush(fill)
         p.drawRoundedRect(rect, 5, 5)

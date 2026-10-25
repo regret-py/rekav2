@@ -66,11 +66,13 @@
   "ui": {
     "geometry": "",
     "minimize_to_tray": false,
+    "show_media": true,
     "background_image": "",
     "background_darkness": 0.45,
     "panel_opacity": 1.0,
     "theme": "studio",
     "pad_modes": [],
+    "colors": {},
     "strip_names": ["Microphone", "Musique", "Appels", "Bureau", "Autres 1", "Autres 2"]
   },
   "state": {}

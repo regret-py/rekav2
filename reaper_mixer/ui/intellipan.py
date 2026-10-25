@@ -38,6 +38,7 @@ class IntelliPad(QWidget):
         self._values: dict[str, tuple[float, float]] = {m: (0.0, 0.0) for m in self._modes}
         self._dragging = False
         self._hover_header = False
+        self.color_scope: int | None = None     # canal (couleur personnalisée du cube)
         self.setFixedHeight(PAD_HEIGHT)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setMouseTracking(True)
@@ -229,23 +230,29 @@ class IntelliPad(QWidget):
         p.setPen(QPen(styles.color(styles.GREEN_DIM, 0.9), 1, Qt.PenStyle.DashLine))
         p.drawLine(QPointF(area.center().x(), area.top()), QPointF(area.center().x(), area.bottom()))
 
-        # Repères rouges vers les bords, puis le petit cube rouge
+        # Repères rouges vers les bords, puis le petit cube rouge (ou sa couleur choisie)
+        cube_color = styles.accent("pad", self.color_scope)
         center = self._to_point(x, y)
-        p.setPen(QPen(styles.color(styles.RED_MUTE, 0.28), 1, Qt.PenStyle.DotLine))
+        p.setPen(QPen(styles.color(cube_color, 0.28), 1, Qt.PenStyle.DotLine))
         p.drawLine(QPointF(area.left(), center.y()), QPointF(area.right(), center.y()))
         p.drawLine(QPointF(center.x(), area.top()), QPointF(center.x(), area.bottom()))
 
         glow = 7.0 if self._dragging else 4.5
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(styles.color(styles.RED_MUTE, 0.22))
+        p.setBrush(styles.color(cube_color, 0.22))
         p.drawRoundedRect(QRectF(center.x() - CUBE / 2 - glow / 2, center.y() - CUBE / 2 - glow / 2,
                                  CUBE + glow, CUBE + glow), 4, 4)
         cube = QRectF(center.x() - CUBE / 2, center.y() - CUBE / 2, CUBE, CUBE)
         face = QLinearGradient(cube.topLeft(), cube.bottomRight())
-        face.setColorAt(0, QColor("#ff7a7a"))
-        face.setColorAt(0.45, QColor(styles.RED_MUTE))
-        face.setColorAt(1, QColor("#a8121b"))
-        p.setPen(QPen(QColor("#3d0508"), 1))
+        if styles.element_color("pad", self.color_scope) is None:    # rouge d'origine
+            light, dark, edge = QColor("#ff7a7a"), QColor("#a8121b"), QColor("#3d0508")
+        else:
+            c = QColor(cube_color)
+            light, dark, edge = c.lighter(145), c.darker(150), c.darker(420)
+        face.setColorAt(0, light)
+        face.setColorAt(0.45, QColor(cube_color))
+        face.setColorAt(1, dark)
+        p.setPen(QPen(edge, 1))
         p.setBrush(face)
         p.drawRoundedRect(cube, 2.2, 2.2)
         # Reflet : petit éclat en haut à gauche, effet « cube »

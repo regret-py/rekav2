@@ -275,14 +275,24 @@ class DemoReaper(EffectsHost):
 
 
 class DemoProcesses:
+    def __init__(self) -> None:
+        self.visible: set[str] = set()     # fenêtres de moteurs « affichées »
+
     def set_window_visible(self, key: str, visible: bool) -> None:
-        pass
+        if visible:
+            self.visible.add(key)
+        else:
+            self.visible.discard(key)
+
+    def is_window_visible(self, key: str) -> bool:
+        return key in self.visible
 
     def focus_window(self, key: str, title_contains: str) -> bool:
         return False
 
     def bring_to_front(self, key: str) -> bool:
-        return False
+        self.visible.add(key)
+        return True
 
     def is_running(self, key: str) -> bool:
         return True

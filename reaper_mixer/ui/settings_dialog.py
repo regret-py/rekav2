@@ -5,6 +5,8 @@ Réglages de REKA, en onglets :
   - Audio      : carte son de REAPER, affichage des moteurs, options
   - Apparence  : thème de couleur, image d'arrière-plan, transparence des
                  panneaux, fenêtre
+  - Couleurs   : couleur de chaque élément (knobs, Muet, VU…), pour toute
+                 la console, un canal ou le Master
   - À propos   : version, développeurs, mises à jour, journaux
 
 Les options s'appliquent tout de suite ; tout est écrit dans la config à la
@@ -93,6 +95,36 @@ class Swatch(QAbstractButton):
         super().leaveEvent(event)
 
 
+class ColorButton(QAbstractButton):
+    """Rectangle de couleur cliquable (choix d'une couleur d'élément) ; liseré
+    clair quand la couleur a été choisie pour cette portée."""
+
+    def __init__(self, color: str, custom: bool, tooltip: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.color = color
+        self.custom = custom
+        self.setFixedSize(52, 22)
+        self.setToolTip(tooltip)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = self.rect().adjusted(1, 1, -1, -1)
+        p.setPen(QPen(QColor(styles.TEXT_PRIMARY if self.custom or self.underMouse()
+                             else styles.BORDER_COLUMN), 1.5 if self.custom else 1))
+        p.setBrush(QColor(self.color))
+        p.drawRoundedRect(rect, 6, 6)
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self.update()
+        super().leaveEvent(event)
+
+
 def _hint(text: str) -> QLabel:
     label = QLabel(text)
     label.setObjectName("hint")
@@ -129,6 +161,8 @@ class SettingsDialog(QDialog):
         self._running_kind = getattr(getattr(vm, "edition", None), "kind", None) or edition(cfg).kind
         self._running_host = getattr(reaper, "kind", None) or host_kind(cfg)
         self.show_reaper: QCheckBox | None = None
+        # Fenêtres déjà affichées (bouton du Master) : laissées affichées en partant
+        self._shown_at_open = {key: self._window_visible(key) for key in ("voicemeeter", "reaper")}
         self.device_label: QLabel | None = None
         self.project_open: QLabel | None = None
 
@@ -159,6 +193,7 @@ class SettingsDialog(QDialog):
                                    self._options_group()), "Audio")
         self.tabs.addTab(self._tab(self._theme_group(), self._widgets_group(), self._background_group(),
                                    self._window_group()), "Apparence")
+        self.tabs.addTab(self._tab(self._colors_group()), "Couleurs")
         self.tabs.addTab(self._about_tab(), "À propos")
         layout.addWidget(self.tabs, 1)
 
@@ -291,6 +326,7 @@ class SettingsDialog(QDialog):
         box.addWidget(prefs)
 
         self.show_reaper = QCheckBox("Afficher la fenêtre de REAPER pendant les réglages")
+        self.show_reaper.setChecked(self._shown_at_open["reaper"])
         self.show_reaper.toggled.connect(lambda on: self._show_engine("reaper", on))
         box.addWidget(self.show_reaper)
         return group
@@ -392,6 +428,7 @@ class SettingsDialog(QDialog):
         self.manage_routing.toggled.connect(lambda on: self._set_option("reaper", "manage_routing", on))
         box.addWidget(self.manage_routing)
         self.show_vm = QCheckBox("Afficher la fenêtre de Voicemeeter pendant les réglages")
+        self.show_vm.setChecked(self._shown_at_open["voicemeeter"])
         self.show_vm.toggled.connect(lambda on: self._show_engine("voicemeeter", on))
         box.addWidget(self.show_vm)
         self.close_vm = QCheckBox("Fermer Voicemeeter en quittant")
@@ -540,7 +577,122 @@ class SettingsDialog(QDialog):
         box.addWidget(self.minimize_to_tray)
         box.addWidget(_hint("REKA reste ouverte et le son continue : clique sur l'icône REKA "
                             "près de l'horloge pour la rouvrir."))
+        self.show_media = QCheckBox("Afficher la musique en cours dans le Master "
+                                    "(pochette, précédent / pause / suivant)")
+        self.show_media.setChecked(bool(self._cfg.get("ui", {}).get("show_media", True)))
+        self.show_media.toggled.connect(lambda on: self._set_ui("show_media", on))
+        box.addWidget(self.show_media)
         return group
+
+    # ----------------------------------------------------------- Couleurs
+    def _colors_group(self) -> QGroupBox:
+        group = QGroupBox("Couleur de chaque élément")
+        box = QVBoxLayout(group)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Appliquer à"))
+        self.color_scope_choice = QComboBox()
+        self.color_scope_choice.addItem("Toute la console", None)
+        names = list(self._cfg.get("ui", {}).get("strip_names", []))
+        count = int(getattr(self._vm, "strip_count", 0) or len(names))
+        for index in range(count):
+            name = names[index] if index < len(names) else f"Strip {index + 1}"
+            self.color_scope_choice.addItem(f"Canal {index + 1} — {name}", index)
+        self.color_scope_choice.addItem("Master", styles.MASTER_SCOPE)
+        self.color_scope_choice.currentIndexChanged.connect(lambda _i: self._show_colors())
+        row.addWidget(self.color_scope_choice, 1)
+        box.addLayout(row)
+        self.color_form = QFormLayout()
+        box.addLayout(self.color_form)
+        self.color_buttons: dict[str, ColorButton] = {}
+        self.color_resets: dict[str, QPushButton] = {}
+        self.color_labels: dict[str, str] = {}
+        box.addWidget(_hint("Clic sur une couleur pour la changer, « Défaut » pour revenir à celle "
+                            "du thème. La couleur d'un canal passe avant celle de toute la console."))
+        reset_all = QPushButton("Tout réinitialiser")
+        reset_all.clicked.connect(self.reset_element_colors)
+        reset_row = QHBoxLayout()
+        reset_row.addStretch(1)
+        reset_row.addWidget(reset_all)
+        box.addLayout(reset_row)
+        self._show_colors()
+        return group
+
+    def _color_elements(self, scope) -> list[tuple[str, str]]:
+        """(élément, nom affiché) proposés pour une portée (console, canal, Master)."""
+        routing = self._cfg.get("voicemeeter", {}).get("routing", [])
+        labels = dict(styles.ELEMENT_LABELS)
+        for route in range(4):
+            label = routing[route].get("label", f"Envoi {route + 1}") if route < len(routing) else ""
+            labels[f"send{route}"] = f"Knob {label}" if label else ""
+        if scope == styles.MASTER_SCOPE:
+            keys = styles.MASTER_ELEMENTS
+        elif scope is None:
+            keys = styles.STRIP_ELEMENTS + tuple(k for k in styles.MASTER_ELEMENTS
+                                                 if k not in styles.STRIP_ELEMENTS)
+        else:
+            keys = styles.STRIP_ELEMENTS
+        return [(key, labels[key]) for key in keys if labels.get(key)]
+
+    def _color_scope(self):
+        return self.color_scope_choice.currentData()
+
+    def _show_colors(self) -> None:
+        """Lignes des éléments de la portée choisie (console, canal, Master)."""
+        while self.color_form.rowCount():
+            self.color_form.removeRow(0)
+        self.color_buttons, self.color_resets, self.color_labels = {}, {}, {}
+        scope = self._color_scope()
+        for element, label in self._color_elements(scope):
+            button = ColorButton(styles.element_default(element), False, label)
+            button.clicked.connect(lambda _c=False, e=element, n=label: self._choose_element_color(e, n))
+            reset = QPushButton("Défaut")
+            reset.setToolTip("Couleur du thème" if scope is None else "Comme toute la console")
+            reset.clicked.connect(lambda _c=False, e=element: self.set_element_color(e, self._color_scope(), None))
+            row = QHBoxLayout()
+            row.addWidget(button)
+            row.addWidget(reset)
+            row.addStretch(1)
+            self.color_form.addRow(label, row)
+            self.color_buttons[element], self.color_resets[element] = button, reset
+            self.color_labels[element] = label
+        self._refresh_colors()
+
+    def _refresh_colors(self) -> None:
+        """Couleurs affichées (en place : un bouton cliqué n'est pas détruit)."""
+        scope = self._color_scope()
+        colors = self._cfg.get("ui", {}).get("colors", {}) or {}
+        for element, button in self.color_buttons.items():
+            custom = styles.color_key(element, scope) in colors
+            button.color = (styles.element_color(element, scope, colors)
+                            or styles.element_default(element))
+            button.custom = custom
+            button.update()
+            self.color_resets[element].setEnabled(custom)
+
+    def _choose_element_color(self, element: str, label: str) -> None:
+        scope = self._color_scope()
+        colors = self._cfg.get("ui", {}).get("colors", {}) or {}
+        current = QColor(styles.element_color(element, scope, colors) or styles.element_default(element))
+        color = QColorDialog.getColor(current, self, f"Couleur — {label}")
+        if color.isValid():
+            self.set_element_color(element, scope, color.name())
+
+    def set_element_color(self, element: str, scope, value: str | None) -> None:
+        """Couleur d'un élément (None : retour à la couleur du thème / de la console),
+        appliquée tout de suite."""
+        colors = self._cfg.setdefault("ui", {}).setdefault("colors", {})
+        key = styles.color_key(element, scope)
+        if value is None:
+            colors.pop(key, None)
+        elif QColor(value).isValid():
+            colors[key] = QColor(value).name()
+        self.appearanceChanged.emit()
+        self._refresh_colors()
+
+    def reset_element_colors(self) -> None:
+        self._cfg.setdefault("ui", {})["colors"] = {}
+        self.appearanceChanged.emit()
+        self._refresh_colors()
 
     # ----------------------------------------------------------- À propos
     def _about_tab(self) -> QWidget:
@@ -563,7 +715,7 @@ class SettingsDialog(QDialog):
         credits.setObjectName("credits")
         credits.setAlignment(Qt.AlignmentFlag.AlignCenter)
         box.addWidget(credits)
-        thanks = QLabel(f"Merci à <b>{config.APP_THANKS}</b> pour leur contribution")
+        thanks = QLabel(f"Merci à <b>{config.APP_THANKS}</b> pour sa contribution")
         thanks.setObjectName("credits")
         thanks.setAlignment(Qt.AlignmentFlag.AlignCenter)
         box.addWidget(thanks)
@@ -676,6 +828,10 @@ class SettingsDialog(QDialog):
     def _show_engine(self, key: str, visible: bool) -> None:
         if self._processes is not None:
             self._processes.set_window_visible(key, visible)
+
+    def _window_visible(self, key: str) -> bool:
+        query = getattr(self._processes, "is_window_visible", None)
+        return bool(query(key)) if query is not None else False
 
     def _open_reaper_prefs(self) -> None:
         self.show_reaper.setChecked(True)
@@ -813,10 +969,10 @@ class SettingsDialog(QDialog):
 
     def done(self, result: int) -> None:
         # Les fenêtres des moteurs ne restent visibles que pendant les réglages
-        if self.show_reaper is not None and self.show_reaper.isChecked():
-            self._show_engine("reaper", False)
-        if self.show_vm.isChecked():
-            self._show_engine("voicemeeter", False)
+        # (sauf celles déjà affichées par les boutons du Master)
+        for key, box in (("reaper", self.show_reaper), ("voicemeeter", self.show_vm)):
+            if box is not None and box.isChecked() and not self._shown_at_open[key]:
+                self._show_engine(key, False)
         connections = []
         if self._reaper is not None:
             connections += [(self._reaper.device_changed, self._show_device),

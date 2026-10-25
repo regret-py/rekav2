@@ -26,6 +26,7 @@ from shiboken6 import delete as delete_now
 from core import config
 from core.app_volume import AppVolumeBackend, NullAppVolumes
 from core.effects import HOST_APO, HOST_NONE, HOST_REAPER
+from core.media import MediaBackend, NullMedia
 from core.process_manager import is_blank_project, reaper_project
 from core.updater import UpdateChecker, UpdateInfo
 from core.voicemeeter_ctrl import DEFAULT_ROUTING, MixerLevels, MixerParams
@@ -52,6 +53,9 @@ LAYOUT_VERSION = 2
 DEFAULT_DARKNESS = 0.45       # assombrissement de l'image d'arrière-plan
 DEFAULT_PANEL_OPACITY = 1.0
 APP_COUNT_MS = 2000           # nombre d'applications affiché sur les boutons « Apps »
+ENGINE_STATE_MS = 2000        # état des boutons Voicemeeter / REAPER (fenêtre affichée ?)
+ENGINE_NAMES = {"voicemeeter": "Voicemeeter", "reaper": "REAPER"}
+MEDIA_RESYNC_MS = 1500        # lecture / pause : état relu si l'application n'a pas réagi
 UPDATE_FIRST_CHECK_MS = 8000  # première vérification des mises à jour après l'ouverture
 DEFAULT_UPDATE_HOURS = 6
 
@@ -192,7 +196,7 @@ class Toast(QLabel):
 class MainWindow(QMainWindow):
     def __init__(self, cfg: dict, vm, reaper, processes, persist: bool = True,
                  apps: AppVolumeBackend | None = None, updater: UpdateChecker | None = None,
-                 parent: QWidget | None = None) -> None:
+                 media: MediaBackend | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._cfg = cfg
         self._persist = persist          # False en mode démo : la config n'est pas touchée
@@ -200,6 +204,7 @@ class MainWindow(QMainWindow):
         self._reaper = reaper
         self._processes = processes
         self._apps = apps or NullAppVolumes()
+        self._media = media or NullMedia()
         self._updater = updater
         self._update: UpdateInfo | None = None
         self._app_mixer: AppMixerPopup | None = None
@@ -243,6 +248,15 @@ class MainWindow(QMainWindow):
         self.master.projectRequested.connect(self._on_project_button)
         self.master.minimizeRequested.connect(self.minimize)
         self.master.updateRequested.connect(self.open_update)
+        self.master.engineRequested.connect(self.toggle_engine_window)
+        # Musique en cours (contrôles média de Windows)
+        self.master.media.previousRequested.connect(self._media.previous)
+        self.master.media.nextRequested.connect(self._media.next)
+        self.master.media.playPauseRequested.connect(self._on_media_play)
+        self._media.changed.connect(self.master.media.set_info)
+        # REAPER seulement s'il applique les effets (FL Studio / APO : bouton Projet)
+        self.master.set_engines([(key, ENGINE_NAMES[key]) for key in ("voicemeeter", "reaper")
+                                 if key == "voicemeeter" or reaper.kind == HOST_REAPER])
         layout.addWidget(self.master)
 
         self.toast = Toast(self.background)
@@ -284,6 +298,13 @@ class MainWindow(QMainWindow):
         if any(strip.apps is not None for strip in self.strips):
             self._app_timer.start()
             QTimer.singleShot(0, self.refresh_app_counts)
+
+        # Fenêtres de Voicemeeter / REAPER affichées (bouton du Master, réglages)
+        self._engine_timer = QTimer(self)
+        self._engine_timer.setInterval(ENGINE_STATE_MS)
+        self._engine_timer.timeout.connect(self.refresh_engine_buttons)
+        self._engine_timer.start()
+        self.refresh_engine_buttons()
 
         # Mises à jour : au démarrage (option), puis régulièrement
         self._update_timer = QTimer(self)
@@ -442,6 +463,44 @@ class MainWindow(QMainWindow):
         self._app_mixer = None
         QTimer.singleShot(0, self.refresh_app_counts)
 
+    # ------------------------------------------------------ musique en cours
+    def _on_media_play(self) -> None:
+        self._media.play_pause()
+        # Le bouton a basculé tout de suite ; si l'application n'a pas suivi, on le remet
+        QTimer.singleShot(MEDIA_RESYNC_MS, self, lambda: self.master.media.set_info(self._media.current))
+
+    def _update_media(self) -> None:
+        """Lecteur du Master : affiché si les contrôles média répondent et si
+        l'option est active (réglages → Apparence)."""
+        show = self._media.available and bool(self._cfg.get("ui", {}).get("show_media", True))
+        if show:
+            self._media.start()
+            self.master.media.set_info(self._media.current)
+        else:
+            self._media.stop()
+        self.master.media.setVisible(show)
+
+    # ------------------------------------------- fenêtres de Voicemeeter / REAPER
+    def _engine_visible(self, key: str) -> bool:
+        query = getattr(self._processes, "is_window_visible", None)
+        return bool(query(key)) if query is not None else False
+
+    def refresh_engine_buttons(self) -> None:
+        for key in self.master.engines:
+            self.master.set_engine_shown(key, self._engine_visible(key))
+
+    def toggle_engine_window(self, key: str) -> None:
+        """Bouton du Master : affiche la fenêtre du moteur (au premier plan), ou
+        la recache si elle est déjà affichée."""
+        name = ENGINE_NAMES.get(key, key)
+        if self._processes is None:
+            return
+        if self._engine_visible(key):
+            self._processes.set_window_visible(key, False)
+        elif not self._processes.bring_to_front(key):
+            self.toast.show_message(f"{name} ne tourne pas : relance REKA pour le démarrer.")
+        self.refresh_engine_buttons()
+
     # ------------------------------------------------------- mises à jour
     def _on_update_available(self, update: UpdateInfo) -> None:
         skipped = int(self._cfg.get("update", {}).get("skipped_build", 0) or 0)
@@ -570,6 +629,7 @@ class MainWindow(QMainWindow):
         dialog.updateRequested.connect(dialog.accept)
         dialog.exec()
         delete_now(dialog)        # tout de suite : pas de suppression différée en suspens
+        self.refresh_engine_buttons()   # « Afficher la fenêtre… » des réglages
         if restart:
             self.restart_app()
         elif update:
@@ -590,6 +650,10 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         if app is not None:
             styles.refresh(app, float(ui_cfg.get("panel_opacity", DEFAULT_PANEL_OPACITY)))
+        for strip in self.strips:             # couleurs par élément (feuilles de style)
+            strip.apply_colors()
+        self.master.apply_colors()
+        self._update_media()
         if theme_changed:
             # Widgets dessinés à la main : ils relisent la palette en se redessinant
             self.toast.refresh_style()
@@ -762,6 +826,7 @@ class MainWindow(QMainWindow):
         for legacy in ("width", "height"):   # remplacés par « geometry »
             ui_cfg.pop(legacy, None)
         self._save_config()
+        self._media.stop()
         if self._tray is not None:
             self._tray.hide()
         super().closeEvent(event)
