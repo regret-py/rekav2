@@ -594,6 +594,12 @@ class ProcessManager:
             _set_windows_visible(managed.main_windows(), visible)
         log.info("%s : fenêtre %s.", managed.spec.name, "affichée" if visible else "masquée")
 
+    def is_window_visible(self, key: str) -> bool:
+        """La fenêtre principale du moteur est-elle affichée à la demande de
+        l'utilisateur (set_window_visible / bring_to_front) ?"""
+        managed = self._get(key)
+        return managed is not None and not managed.keep_hidden and managed.is_alive()
+
     def bring_to_front(self, key: str) -> bool:
         """Affiche la fenêtre principale d'un moteur et la met au premier plan
         (FL Studio : ses effets se règlent dans sa propre fenêtre)."""

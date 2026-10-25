@@ -176,7 +176,7 @@ def test_custom_background_and_panel_opacity(qapp, mixer, tmp_path, appdata):
     dialog = SettingsDialog(window._cfg, None, reaper, vm, window, persist=False)
     dialog.appearanceChanged.connect(window.apply_appearance)
     assert [dialog.tabs.tabText(i) for i in range(dialog.tabs.count())] == [
-        "Général", "Canaux", "Audio", "Apparence", "À propos"]
+        "Général", "Canaux", "Audio", "Apparence", "Couleurs", "À propos"]
     assert not dialog.remove_background.isEnabled()
     dialog.set_background(image)                # copiée dans %APPDATA%/REKA
     assert window._cfg["ui"]["background_image"] == "background.png"
@@ -563,6 +563,53 @@ def test_update_banner_and_skip(qapp, updating):
     assert window.master.update_button.isHidden()        # version ignorée : plus de pill
 
 
+def test_update_installed_directly_in_background(qapp, updating, monkeypatch):
+    """Mise à jour directe en cours de route : installée sans rien demander, la
+    pill propose ensuite de redémarrer."""
+    from pathlib import Path
+
+    from PySide6.QtCore import QObject, Signal
+
+    import ui.main_window as main_window
+
+    window, updater, update = updating
+    installed, asked = [], []
+
+    class Downloader(QObject):
+        finished = Signal(object)
+        failed = Signal(str)
+
+        def __init__(self, info):
+            super().__init__()
+
+        def start(self):
+            self.finished.emit(Path(f"REKA-{update.build}.exe"))
+
+    monkeypatch.setattr(main_window, "UpdateDownloader", Downloader)
+    monkeypatch.setattr(main_window, "can_self_update", lambda: True)
+    monkeypatch.setattr(main_window, "install", lambda path, current: installed.append(path.name))
+    monkeypatch.setattr(window, "_persist", True)
+    updater.available.emit(update)
+    pump(qapp, 0.05)
+    assert installed == ["REKA-7.exe"] and window._installed is update
+    assert not window.master.update_button.isHidden()
+    updater.available.emit(update)                       # même version : rien à refaire
+    pump(qapp, 0.05)
+    assert installed == ["REKA-7.exe"]
+
+    monkeypatch.setattr(QMessageBox, "question",
+                        lambda *args: asked.append(args[2]) or QMessageBox.StandardButton.No)
+    QTest.mouseClick(window.master.update_button, LEFT)
+    assert asked and "0.6.0" in asked[0]
+
+    # Option désactivée : la pill demande, comme avant
+    window._installed = window._update = None
+    window._cfg["update"]["auto_install"] = False
+    updater.available.emit(update)
+    pump(qapp, 0.05)
+    assert installed == ["REKA-7.exe"] and window._update is update
+
+
 def test_about_tab_update_check(qapp, updating):
     from ui.settings_dialog import SettingsDialog
 
@@ -675,3 +722,215 @@ def test_dialogs_do_not_pile_up(qapp, mixer):
         window.choose_project()
     pump(qapp, 0.05)
     assert not window.findChildren(VstDialog) and not window.findChildren(ProjectDialog)
+
+
+def wheel(widget, delta, modifiers=Qt.KeyboardModifier.NoModifier):
+    pos = QPointF(widget.width() / 2, widget.height() / 2)
+    event = QWheelEvent(pos, widget.mapToGlobal(pos), QPoint(0, 0), QPoint(0, delta), NONE,
+                        modifiers, Qt.ScrollPhase.NoScrollPhase, False)
+    QApplication.sendEvent(widget, event)
+
+
+def test_knobs_move_by_half_db(qapp, mixer):
+    """Knobs d'envoi et du casque : un cran de molette = 0,5 dB, glisser = pas de 0,5 dB,
+    y compris avec une molette « haute résolution » (crans fractionnés)."""
+    window, vm, _ = mixer
+    knob = window.strips[1].knobs[0]
+    assert vm._strips[1].sends[0] == 0.0
+    wheel(knob, -120)
+    assert vm._strips[1].sends[0] == -0.5
+    for _ in range(15):                    # 15 × 8 = un cran entier
+        wheel(knob, -8)
+    assert vm._strips[1].sends[0] == -1.0
+    wheel(knob, -240)
+    assert vm._strips[1].sends[0] == -2.0
+
+    center = (knob.width() / 2, knob.height() / 2)
+    for dy in (13, 37, 61):
+        drag(knob, center, (center[0], center[1] + dy))
+        value = vm._strips[1].sends[0]
+        assert value * 2 == round(value * 2), value          # multiple de 0,5 dB
+    assert vm._strips[1].sends[0] < -2.0
+
+    master = window.master.knob
+    wheel(master, 120)
+    assert vm._headphone == 0.5
+    wheel(master, -360)
+    assert vm._headphone == -1.0
+    assert window.master.value_label.text() == "-1.0 dB"
+
+
+def test_wheel_not_undone_by_stale_voicemeeter_values(qapp, mixer):
+    """Les valeurs relues dans Voicemeeter avant le réglage (encore en route vers
+    l'UI) ne ramènent plus le knob ou le fader en arrière pendant la molette."""
+    from dataclasses import replace
+
+    from core.voicemeeter_ctrl import MixerParams
+
+    window, vm, _ = mixer
+    strip = window.strips[2]
+    stale = MixerParams(tuple(vm._strips), vm._headphone)
+    knob = strip.knobs[2]                  # Discord
+    start = vm._strips[2].sends[2]
+    for step in range(1, 5):
+        wheel(knob, 120)
+        window._on_params(stale)           # relecture antérieure au réglage
+        assert knob.value() == start + 0.5 * step
+    assert vm._strips[2].sends[2] == start + 2.0
+
+    fader = strip.fader
+    for step in range(1, 4):
+        wheel(fader, 120)
+        window._on_params(stale)
+    assert vm._strips[2].gain == 1.5 and fader.value() == 1.5
+
+    # Plus tard, Voicemeeter reprend la main (réglage fait dans Voicemeeter)
+    knob._wheel_until = fader._wheel_until = 0.0
+    strips = list(vm._strips)
+    strips[2] = replace(strips[2], gain=-3.0, sends=(0.0, 0.0, -6.0, 0.0))
+    window._on_params(MixerParams(tuple(strips), 0.0))
+    assert fader.value() == -3.0 and knob.value() == -6.0
+
+
+def test_engine_buttons_show_and_hide_windows(qapp, mixer):
+    """Boutons Voicemeeter / REAPER du Master : clic = fenêtre affichée, re-clic =
+    cachée ; les réglages ne recachent pas une fenêtre affichée par le Master."""
+    from ui.settings_dialog import SettingsDialog
+
+    window, vm, reaper = mixer
+    processes = window._processes
+    buttons = window.master.engines
+    assert list(buttons) == ["voicemeeter", "reaper"]
+    QTest.mouseClick(buttons["voicemeeter"], LEFT)
+    assert processes.is_window_visible("voicemeeter") and buttons["voicemeeter"].is_shown()
+    assert not buttons["reaper"].is_shown()
+    assert "cacher" in buttons["voicemeeter"].toolTip()
+
+    dialog = SettingsDialog(window._cfg, processes, reaper, vm, window, persist=False)
+    assert dialog.show_vm.isChecked() and not dialog.show_reaper.isChecked()
+    dialog.show_reaper.setChecked(True)            # affichée le temps des réglages
+    assert processes.is_window_visible("reaper")
+    dialog.done(0)
+    window.refresh_engine_buttons()
+    assert processes.is_window_visible("voicemeeter") and not processes.is_window_visible("reaper")
+    assert not buttons["reaper"].is_shown()
+
+    QTest.mouseClick(buttons["voicemeeter"], LEFT)
+    assert not processes.is_window_visible("voicemeeter") and not buttons["voicemeeter"].is_shown()
+    QTest.mouseClick(buttons["reaper"], LEFT)
+    assert processes.is_window_visible("reaper") and buttons["reaper"].is_shown()
+    assert buttons["voicemeeter"].width() > buttons["reaper"].width() > 40
+
+
+def test_no_reaper_button_with_other_hosts(qapp, cfg):
+    import main
+    from core.demo import DemoProcesses, DemoVoicemeeter
+    from ui.main_window import MainWindow
+
+    session = dict(cfg)
+    session["effects"] = {"host": "none"}
+    processes = DemoProcesses()
+    window = MainWindow(cfg=session, vm=DemoVoicemeeter(session),
+                        reaper=main.demo_host(session, "none", processes),
+                        processes=processes, persist=False)
+    try:
+        assert list(window.master.engines) == ["voicemeeter"]
+    finally:
+        window.close()
+
+
+def test_element_colors_per_console_and_channel(qapp, mixer):
+    """Couleur de chaque élément : pour toute la console, puis un canal en particulier
+    (prioritaire), appliquée tout de suite ; « Défaut » et « Tout réinitialiser » reviennent au thème."""
+    from PySide6.QtGui import QColor
+
+    from ui import styles
+    from ui.settings_dialog import SettingsDialog
+
+    window, vm, reaper = mixer
+    dialog = SettingsDialog(window._cfg, window._processes, reaper, vm, window, persist=False)
+    dialog.appearanceChanged.connect(window.apply_appearance)
+    try:
+        tabs = [dialog.tabs.tabText(i) for i in range(dialog.tabs.count())]
+        assert "Couleurs" in tabs
+        assert "send2" in dialog.color_buttons and "headphone" in dialog.color_buttons
+        assert dialog.color_labels["send2"] == "Knob Discord"
+
+        dialog.set_element_color("mute", None, "#00ff00")
+        dialog.set_element_color("send2", None, "#ff00ff")
+        assert window._cfg["ui"]["colors"] == {"mute": "#00ff00", "send2": "#ff00ff"}
+        assert all("#00ff00" in strip.mute.styleSheet() for strip in window.strips)
+        assert styles.accent("send2", 0) == "#ff00ff" and styles.accent("send1", 0) == styles.GREEN_NEON
+        assert dialog.color_buttons["mute"].custom and dialog.color_resets["mute"].isEnabled()
+
+        # Canal 2 seulement : prioritaire sur toute la console
+        dialog.color_scope_choice.setCurrentIndex(dialog.color_scope_choice.findData(1))
+        assert "headphone" not in dialog.color_buttons
+        assert dialog.color_buttons["mute"].color == "#00ff00" and not dialog.color_buttons["mute"].custom
+        dialog.set_element_color("mute", 1, "#123456")
+        dialog.set_element_color("panel", 1, "#402000")
+        dialog.set_element_color("name", 1, "#ffcc00")
+        assert "#123456" in window.strips[1].mute.styleSheet()
+        assert "#00ff00" in window.strips[0].mute.styleSheet()
+        assert "64, 32, 0" in window.strips[1].styleSheet() and not window.strips[0].styleSheet()
+        assert "#ffcc00" in window.strips[1].name._label.styleSheet()
+        dialog.set_element_color("vu", styles.MASTER_SCOPE, "#ff8800")
+        assert styles.accent("vu", styles.MASTER_SCOPE) == "#ff8800" and styles.accent("vu", 1) == styles.GREEN_NEON
+        window.grab()                                    # rendu avec les couleurs choisies
+        window.strips[1].mute.setChecked(True)
+        image = window.strips[1].mute.grab().toImage()
+        assert image.pixelColor(image.width() // 2, 3) == QColor("#123456")
+
+        dialog.color_resets["mute"].click()               # « Défaut » : comme toute la console
+        assert "#00ff00" in window.strips[1].mute.styleSheet()
+        dialog.reset_element_colors()
+        assert window._cfg["ui"]["colors"] == {}
+        assert not window.strips[1].mute.styleSheet() and not window.strips[1].styleSheet()
+        assert styles.accent("send2", 0) == styles.GREEN_NEON
+    finally:
+        window._cfg["ui"]["colors"] = {}
+        window.apply_appearance()
+        dialog.done(0)
+
+
+def test_media_player_in_master(qapp, mixer):
+    """Musique en cours (démo) : pochette, titre, précédent / pause / suivant, option
+    pour le cacher ; caché quand les contrôles média de Windows manquent."""
+    window, _vm, _reaper = mixer
+    media = window.master.media
+    backend = window._media
+    assert media.isVisible() and media.cover.has_cover()
+    assert media.title.text() == "Néons de minuit" and media.artist.text() == "Les Ondes"
+    assert media.play.is_playing() and "Spotify" in media.toolTip()
+
+    QTest.mouseClick(media.next, LEFT)
+    assert media.title.text() == "Ligne de basse" and backend.current.app == "Deezer"
+    QTest.mouseClick(media.play, LEFT)
+    assert not media.play.is_playing() and not backend.current.playing
+    QTest.mouseClick(media.previous, LEFT)
+    assert media.title.text() == "Néons de minuit"
+    window.grab()
+
+    window._cfg["ui"]["show_media"] = False
+    window.apply_appearance()
+    assert media.isHidden()
+    window._cfg["ui"]["show_media"] = True
+    window.apply_appearance()
+    assert media.isVisible()
+
+    backend._publish(None)                  # plus rien ne joue
+    assert media.title.text() == "Rien en lecture" and not media.play.isEnabled()
+    assert not media.cover.has_cover()
+
+
+def test_media_player_hidden_without_backend(qapp, cfg):
+    from core.demo import DemoProcesses, DemoReaper, DemoVoicemeeter
+    from ui.main_window import MainWindow
+
+    window = MainWindow(cfg=cfg, vm=DemoVoicemeeter(cfg), reaper=DemoReaper(cfg),
+                        processes=DemoProcesses(), persist=False)
+    try:
+        window.show()
+        assert window.master.media.isHidden()
+    finally:
+        window.close()

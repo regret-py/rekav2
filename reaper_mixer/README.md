@@ -6,7 +6,7 @@ Console de mixage unique pour Windows : elle pilote **Voicemeeter Potato ou Bana
 (routing, volumes, mutes, VU-mètres) et **REAPER** (effets VST par strip), qui tournent
 tous les deux cachés en arrière-plan. L'utilisateur ne voit que la console.
 
-Développé par **Regrettable**. Merci à **Zerka** et **Fyra** pour leur contribution.
+Développé par **Regrettable** et **Zerka**. Merci à **206** pour sa contribution.
 
 ![console](https://github.com/regret-py/rekav2/releases/download/build-claude-charming-hawking-bll4o5/console.png)
 
@@ -63,7 +63,7 @@ sur son insert (désactivable dans ⚙ → Options).
 | Élément | Action |
 |---|---|
 | Fader | glisser (Maj = fin), molette, double-clic = 0 dB ; de -60 à +12 dB, comme Voicemeeter |
-| Knobs Monitor / Mic Out / Discord / Obs | clic = envoi on/off vers A1 / B1 / B2 / A2, glisser = niveau d'envoi |
+| Knobs Monitor / Mic Out / Discord / Obs | clic = envoi on/off vers A1 / B1 / B2 / A2, glisser ou molette = niveau d'envoi, par pas de 0,5 dB |
 | Intellipan (carré au petit cube rouge) | glisser le cube = régler, double-clic = neutre, clic sur le titre ou clic droit = mode |
 | Bouton Apps (strips virtuelles) | volume, mute et niveau de chaque application qui joue sur la strip |
 | Pill « Mise à jour » (Master) | apparaît quand une nouvelle version est en ligne ; clic pour l'installer |
@@ -72,11 +72,13 @@ sur son insert (désactivable dans ⚙ → Options).
 | Emplacement vide (« + ») | ajouter un effet (REAPER, Equalizer APO) ; FL Studio : l'afficher |
 | Badge FX ⏻ | bypass de toute la chaîne d'effets de la strip (FL Studio : envoi à l'insert) |
 | Nom de la strip | double-clic ou clic droit pour renommer (renomme aussi la piste REAPER) ; tous les noms : ⚙ → Canaux |
-| Knob Casque | volume du bus A1 (double-clic = 0 dB) |
+| Knob Casque | volume du bus A1, par pas de 0,5 dB (molette : un cran = 0,5 dB ; double-clic = 0 dB) |
+| Boutons Voicemeeter / REAPER (Master) | affichent la fenêtre du moteur au premier plan ; re-clic = la recacher (ne la ferme pas avec la croix : le son ou les effets s'arrêteraient) |
+| Musique en cours (Master) | pochette, titre et artiste de ce qui joue (Spotify, Deezer, navigateur…), boutons précédent / lecture-pause / suivant |
 | Badge de connexion | vert = tout répond ; rouge = le moteur d'effets ou Voicemeeter ne répond plus |
 | Bouton Projet | projet REAPER ouvert, clic pour en changer ; FL Studio / Equalizer APO : l'ouvrir |
 | Bouton – (Master) | réduire REKA (barre des tâches, ou zone de notification si activé) |
-| Bouton ⚙ (Master) | réglages : Général, Canaux, Audio, Apparence, À propos |
+| Bouton ⚙ (Master) | réglages : Général, Canaux, Audio, Apparence, Couleurs, À propos |
 
 `REKA.exe --demo` ouvre la console avec des moteurs simulés (sans Voicemeeter ni REAPER)
 pour la découvrir ; `--demo --host flstudio` (ou `apo`, `none`) montre les autres moteurs
@@ -149,35 +151,18 @@ correspondante dans l'application ou dans Windows (Paramètres › Son › Méla
 Si tes périphériques ont d'autres noms, indique-les dans `config.json`
 (`voicemeeter.app_devices`, un morceau de nom par entrée virtuelle).
 
-## Noms des périphériques dans Windows
-
-REKA renomme automatiquement les périphériques Windows de Voicemeeter, pour que Discord,
-OBS ou les jeux affichent des noms clairs :
-
-| Périphérique Voicemeeter | Nom REKA |
-|---|---|
-| Voicemeeter Input (lecture) | **REKA insert** |
-| Voicemeeter AUX Input | **REKA aux** |
-| Voicemeeter VAIO3 Input (Potato) | **REKA VAIO3** |
-| Voicemeeter Out B1 / B2 / B3 (enregistrement) | **REKA B1** / **REKA B2** / **REKA B3** |
-
-Les autres (*Voicemeeter In 1…5*, *Out A1…A5*) gardent leur nom. C'est le même
-périphérique (seul le nom change) : les applications gardent leur réglage.
-
-- Chaque périphérique est reconnu par le nom que lui donne le pilote de Voicemeeter (pas
-  par le nom du pilote, commun à tous). Un périphérique non reconnu n'est jamais renommé.
-- Windows exige les droits administrateur pour renommer : la première fois, REKA demande
-  l'autorisation (une fenêtre Windows), puis plus rien tant que les noms sont bons.
-- Autres noms : `voicemeeter.device_names` dans `config.json` (ex. `{"B1": "REKA Micro"}`,
-  clés `in0` `in1` `in2` `B1` `B2` `B3`). Décocher ⚙ → Audio → *Renommer les périphériques
-  Voicemeeter* remet les noms d'origine.
-- Un nom « REKA … » donné par erreur (version précédente) reprend son nom d'origine au
-  démarrage ; si REKA ne peut pas le retrouver, il affiche la liste à renommer à la main.
-
 ## Mises à jour
 
-REKA vérifie au démarrage (puis toutes les 6 heures) si une nouvelle version est en ligne.
-Si oui, une pill **Mise à jour** apparaît dans le panneau Master :
+REKA se met à jour **directement** : au lancement, avant de démarrer Voicemeeter et
+REAPER, il cherche une nouvelle version ; s'il y en a une, il la télécharge, vérifie
+qu'elle est complète (empreinte SHA-256), remplace `REKA.exe` et redémarre dessus, sans
+rien demander. Une version publiée pendant que REKA tourne est installée en arrière-plan,
+sans couper le son : elle s'ouvre au prochain lancement (pill **Mise à jour** pour
+redémarrer tout de suite). Hors ligne, REKA démarre normalement après 4 secondes au plus.
+
+Option ⚙ → **À propos** → *Installer les mises à jour directement* (activée par défaut).
+Décochée, REKA vérifie au démarrage (puis toutes les 6 heures) et une pill **Mise à jour**
+apparaît dans le panneau Master :
 
 - **Mettre à jour** : REKA télécharge le nouvel exe, vérifie qu'il est complet (empreinte
   SHA-256), le met à la place de l'ancien puis redémarre dessus. Réglages et projet REAPER
@@ -188,6 +173,16 @@ Si oui, une pill **Mise à jour** apparaît dans le panneau Master :
 ⚙ → **À propos** : version et numéro de build, **Rechercher une mise à jour**, et l'option
 **Vérifier les mises à jour au démarrage**. Chaque build GitHub publie, à côté de
 `REKA.exe`, un `version.json` (numéro de build, taille, empreinte) que REKA consulte.
+
+## Musique en cours
+
+Le Master affiche la **pochette** de la musique qui joue, son titre et son artiste, avec
+les boutons **précédent**, **lecture / pause** et **suivant**. Ce sont les contrôles
+média de Windows (ceux de l'écran de verrouillage et de la fenêtre du volume) : ça
+marche avec Spotify, Deezer, les navigateurs (YouTube…), le Lecteur multimédia, sans
+rien régler. S'il y a plusieurs lecteurs, c'est celui que Windows considère comme
+« en cours » qui s'affiche. On peut le masquer : ⚙ → Apparence → *Afficher la musique
+en cours dans le Master*.
 
 ## Personnaliser l'interface
 
@@ -206,6 +201,14 @@ Si oui, une pill **Mise à jour** apparaît dans le panneau Master :
   taille d'origine, centrée. Coche *Réduire dans la zone de notification* pour que le
   bouton **–** l'envoie à côté de l'horloge (le son continue ; clic sur l'icône REKA pour
   la rouvrir, clic droit → *Quitter REKA*).
+
+⚙ → onglet **Couleurs** : la couleur de **chaque élément**, indépendamment du thème —
+chaque knob d'envoi (Monitor, Mic Out, Discord, Obs), fader, VU-mètres, bouton Muet,
+badge FX, pills d'effets, petit cube de l'Intellipan, bouton Apps, nom et fond du canal,
+knob Casque, boutons Voicemeeter / REAPER, lecteur de musique. *Appliquer à* : toute la
+console, **un seul canal** (prioritaire sur toute la console) ou le Master. *Défaut* revient à
+la couleur du thème, *Tout réinitialiser* efface toutes les couleurs choisies (enregistrées
+dans `config.json`, `ui.colors`).
 
 ## Voicemeeter Potato ou Banana
 
@@ -316,6 +319,7 @@ reaper_mixer/
 │   ├── voicemeeter_ctrl.py faders, mutes, routing, envois, insert, VU (30 Hz)
 │   ├── reaper_ctrl.py      liaison avec le pont Lua (effets, pistes, projet, carte son)
 │   ├── vst_scanner.py      liste des plugins (REAPER, cache, dossiers VST3)
+│   ├── media.py            musique en cours (contrôles média de Windows, WinRT)
 │   └── demo.py             moteurs simulés (--demo, --selftest)
 ├── ui/                     fenêtre, strips, master, knob/fader/VU dessinés, dialogues
 ├── assets/                 logo et icône REKA, police Inter, pont Lua

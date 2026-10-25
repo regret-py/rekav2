@@ -75,3 +75,36 @@ def test_app_volume_backend_loads():
         assert name is None or "voicemeeter" in name.lower() or name
         assert isinstance(apps, list)
     assert create_backend({}).available
+
+
+def test_media_controls_winrt():
+    """Musique en cours, avec le vrai WinRT : une pochette se lit depuis un flux
+    Windows, et le gestionnaire des sessions média répond (ou échoue proprement)."""
+    from core.media import WindowsMedia, probe_media_controls, read_cover, run_in_mta, winrt_wait
+
+    data = bytes(range(256)) * 40
+
+    def cover_roundtrip() -> bytes:
+        from winrt.windows.storage.streams import (DataWriter, InMemoryRandomAccessStream,
+                                                   RandomAccessStreamReference)
+
+        stream = InMemoryRandomAccessStream()
+        writer = DataWriter(stream)
+        writer.write_bytes(data)
+        winrt_wait(writer.store_async())
+        writer.detach_stream()
+        stream.seek(0)
+        return read_cover(RandomAccessStreamReference.create_from_stream(stream))
+
+    assert run_in_mta(cover_roundtrip) == data
+    try:
+        print("Contrôles média :", probe_media_controls())
+    except (OSError, TimeoutError) as exc:      # machine sans session interactive
+        print("Contrôles média injoignables :", exc)
+
+    media = WindowsMedia()
+    media.start()
+    time.sleep(1.5)
+    assert media._thread.is_alive()             # ni plantage ni exception dans le thread
+    media.stop()
+    assert media._thread is None

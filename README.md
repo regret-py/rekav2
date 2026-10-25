@@ -1,1 +1,1 @@
-by Regret — merci à Zerka et Fyra pour leur contribution
+by Regret et Zerka — merci à 206 pour sa contribution

@@ -23,9 +23,9 @@ from pathlib import Path
 from typing import Any
 
 APP_NAME = "REKA"
-APP_VERSION = "0.5.0"
-APP_AUTHORS = "Regrettable"
-APP_THANKS = "Zerka et Fyra"   # remerciements pour leur contribution
+APP_VERSION = "0.6.0"
+APP_AUTHORS = "Regrettable et Zerka"   # développeurs
+APP_THANKS = "206"                     # remerciements pour sa contribution
 CONFIG_FILENAME = "config.json"
 LEGACY_DIR_NAME = "REAPER Mixer"   # ancien nom de l'application (données reprises)
 

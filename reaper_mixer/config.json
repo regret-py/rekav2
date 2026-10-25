@@ -27,12 +27,11 @@
     "terminate_on_exit": true,
     "app_devices": [],
     "buffer": 0,
-    "wdm_shared": false,
-    "rename_devices": true,
-    "device_names": {}
+    "wdm_shared": false
   },
   "update": {
     "check_on_start": true,
+    "auto_install": true,
     "interval_hours": 6,
     "skipped_build": 0,
     "url": ""
@@ -68,11 +67,13 @@
   "ui": {
     "geometry": "",
     "minimize_to_tray": false,
+    "show_media": true,
     "background_image": "",
     "background_darkness": 0.45,
     "panel_opacity": 1.0,
     "theme": "studio",
     "pad_modes": [],
+    "colors": {},
     "strip_names": ["Microphone", "Musique", "Appels", "Bureau", "Autres 1", "Autres 2"]
   },
   "state": {}

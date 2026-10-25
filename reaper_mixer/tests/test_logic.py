@@ -612,82 +612,205 @@ def test_app_volume_device_matching_and_demo():
     assert not NullAppVolumes().available and NullAppVolumes().apps(0) == []
 
 
-# ------------------------------------------------ noms Windows des périphériques
-def _vm_endpoint(ident, capture, name, original=""):
-    from core.device_names import Endpoint
+# ----------------------------------------------------------- musique en cours
+def test_media_app_labels():
+    from core.media import app_label
 
-    return Endpoint(ident, capture, name, original, "VB-Audio Voicemeeter VAIO")
-
-
-def test_device_names_one_driver_for_all_devices():
-    """Voicemeeter récent : toutes ses entrées/sorties ont le même pilote."""
-    from core.device_names import plan
-
-    cfg = {"voicemeeter": {"kind": "potato"}}
-    endpoints = [_vm_endpoint("r0", False, "Voicemeeter Input"),
-                 _vm_endpoint("r1", False, "Voicemeeter AUX Input"),
-                 _vm_endpoint("r2", False, "Voicemeeter VAIO3 Input"),
-                 _vm_endpoint("r3", False, "Voicemeeter In 1"),
-                 _vm_endpoint("c0", True, "Voicemeeter Out B1"),
-                 _vm_endpoint("c1", True, "Voicemeeter Out B2"),
-                 _vm_endpoint("c2", True, "Voicemeeter Out B3"),
-                 _vm_endpoint("c3", True, "Voicemeeter Out A1")]
-    changes, lost = plan(cfg, endpoints, {})
-    assert [(e.id, name) for e, name, _key in changes] == [
-        ("r0", "REKA insert"), ("r1", "REKA aux"), ("r2", "REKA VAIO3"),
-        ("c0", "REKA B1"), ("c1", "REKA B2"), ("c2", "REKA B3")]
-    assert lost == []
-
-    # Déjà renommés : reconnus par ce que REKA a noté, rien à refaire
-    renamed = [_vm_endpoint(e.id, e.capture, n) for e, n, _k in changes]
-    memory = {e.id: k for e, _n, k in changes}
-    assert plan(cfg, renamed, memory) == ([], [])
-
-    # Option désactivée : noms d'origine
-    cfg["voicemeeter"]["rename_devices"] = False
-    back = [(e.id, n) for e, n, _k in plan(cfg, renamed, memory)[0]]
-    assert ("r1", "Voicemeeter AUX Input") in back and ("c0", "Voicemeeter Out B1") in back
+    assert app_label("Spotify.exe") == "Spotify"
+    assert app_label("SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify") == "Spotify"
+    assert app_label("MSEdge") == "Edge"
+    assert app_label("308046B0AF4A39CB") == "Firefox"
+    assert app_label("Microsoft.ZuneMusic_8wekyb3d8bbwe!Microsoft.ZuneMusic") == "Lecteur multimédia"
+    assert app_label(r"C:\Program Files\Foobar2000\foobar2000.exe") == "foobar2000"
+    assert app_label("") == ""
 
 
-def test_device_names_repairs_wrong_names_from_pin_names():
-    """Version précédente : toutes les entrées VAIO renommées « REKA jeux »."""
-    from core.device_names import plan
+class _Op:
+    """Opération asynchrone WinRT simulée (wait / get_results / cancel)."""
 
-    cfg = {"voicemeeter": {"kind": "potato", "device_names": {"B2": "Mon Discord"}}}
-    endpoints = [_vm_endpoint("r0", False, "REKA jeux", "Voicemeeter Input"),
-                 _vm_endpoint("r1", False, "REKA jeux", "Voicemeeter AUX Input"),
-                 _vm_endpoint("r3", False, "REKA jeux", "Voicemeeter In 1"),
-                 _vm_endpoint("c1", True, "REKA Micro", "Voicemeeter Out B2"),
-                 _vm_endpoint("c3", True, "REKA Micro", "Voicemeeter Out A1")]
-    changes, lost = plan(cfg, endpoints, {})
-    assert [(e.id, n) for e, n, _k in changes] == [
-        ("r0", "REKA insert"), ("r1", "REKA aux"), ("r3", "Voicemeeter In 1"),
-        ("c1", "Mon Discord"), ("c3", "Voicemeeter Out A1")]
-    assert lost == []
+    def __init__(self, result=None, status=1, error=None):
+        self.result, self.status, self.error, self.cancelled = result, status, error, False
 
+    def wait(self, timeout):
+        return self.status
 
-def test_device_names_never_guesses():
-    from core.device_names import plan
+    def get_results(self):
+        if self.error is not None:
+            raise self.error
+        return self.result
 
-    cfg = {"voicemeeter": {"kind": "potato"}}
-    # Nom d'origine illisible : un nom REKA inconnu est signalé, pas deviné
-    changes, lost = plan(cfg, [_vm_endpoint("r0", False, "REKA jeux")], {})
-    assert changes == [] and [e.id for e in lost] == ["r0"]
-    # Deux périphériques notés comme le même : aucun n'est renommé
-    endpoints = [_vm_endpoint("c0", True, "Voicemeeter Out B1"), _vm_endpoint("c9", True, "Micro")]
-    assert plan(cfg, endpoints, {"c9": "B1"})[0] == []
-    # Nom de broche commun à plusieurs périphériques : ignoré
-    endpoints = [_vm_endpoint("c0", True, "Voicemeeter Out B1", "Voicemeeter VAIO"),
-                 _vm_endpoint("c1", True, "Voicemeeter Out B2", "Voicemeeter VAIO")]
-    assert [n for _e, n, _k in plan(cfg, endpoints, {})[0]] == ["REKA B1", "REKA B2"]
+    def cancel(self):
+        self.cancelled = True
 
 
-def test_apo_finds_renamed_virtual_input():
-    from core.apo_ctrl import Endpoint, resolve_device
+class _Buffer(bytearray):
+    @property
+    def length(self):
+        return len(self)
 
-    endpoints = [Endpoint("REKA insert (VB-Audio Voicemeeter VAIO)", "{aaa}", False),
-                 Endpoint("REKA B1 (VB-Audio Voicemeeter VAIO)", "{bbb}", True),
-                 Endpoint("REKA aux (VB-Audio Voicemeeter VAIO)", "{ccc}", False),
-                 Endpoint("Voicemeeter In 1 (VB-Audio Voicemeeter VAIO)", "{ddd}", False)]
-    assert resolve_device("Voicemeeter Input", endpoints)[0] == "{aaa}"
-    assert resolve_device("Voicemeeter AUX Input", endpoints)[0] == "{ccc}"
+
+class _Stream:
+    def __init__(self, data):
+        self.size, self._data, self.closed = len(data), data, False
+
+    def read_async(self, buffer, count, options):
+        return _Op(_Buffer(self._data[:count]))
+
+    def close(self):
+        self.closed = True
+
+
+class _Reference:
+    def __init__(self, data):
+        self.data, self.opened = data, 0
+
+    def open_read_async(self):
+        self.opened += 1
+        return _Op(_Stream(self.data))
+
+
+class _Session:
+    """Session média simulée (une application qui joue)."""
+
+    def __init__(self):
+        self.tracks = [("Morceau A", "Artiste A", b"cover-A"), ("Morceau B", "Artiste B", b"cover-B")]
+        self.index, self.playing, self.calls = 0, True, []
+        self.source_app_user_model_id = "Spotify.exe"
+
+    def try_get_media_properties_async(self):
+        title, artist, cover = self.tracks[self.index]
+        return _Op(types.SimpleNamespace(title=title, artist=artist, album_title="Album",
+                                         thumbnail=_Reference(cover)))
+
+    def get_playback_info(self):
+        controls = types.SimpleNamespace(is_previous_enabled=self.index > 0, is_next_enabled=True,
+                                         is_play_pause_toggle_enabled=True)
+        return types.SimpleNamespace(playback_status=4 if self.playing else 5, controls=controls)
+
+    def try_toggle_play_pause_async(self):
+        self.calls.append("play_pause")
+        self.playing = not self.playing
+        return _Op(True)
+
+    def try_skip_next_async(self):
+        self.calls.append("next")
+        self.index = min(self.index + 1, len(self.tracks) - 1)
+        return _Op(True)
+
+    def try_skip_previous_async(self):
+        self.calls.append("previous")
+        self.index = max(self.index - 1, 0)
+        return _Op(True)
+
+
+@pytest.fixture
+def fake_winrt(monkeypatch):
+    """Modules WinRT simulés : le thread de WindowsMedia tourne aussi hors Windows."""
+    session = _Session()
+    manager = types.SimpleNamespace(get_current_session=lambda: session)
+    runtime = types.SimpleNamespace(init_apartment=lambda kind: None,
+                                    ApartmentType=types.SimpleNamespace(MULTI_THREADED=1))
+    control = types.SimpleNamespace(GlobalSystemMediaTransportControlsSessionManager=types.SimpleNamespace(
+        request_async=lambda: _Op(manager)))
+    streams = types.SimpleNamespace(Buffer=lambda size: _Buffer(), InputStreamOptions=types.SimpleNamespace(
+        READ_AHEAD=2))
+    winrt = types.ModuleType("winrt")
+    winrt.runtime = runtime
+    for name, module in (("winrt", winrt), ("winrt.runtime", runtime),
+                         ("winrt.windows.media.control", control),
+                         ("winrt.windows.storage.streams", streams)):
+        monkeypatch.setitem(sys.modules, name, module)
+    return session
+
+
+def test_winrt_wait_timeout_and_errors():
+    from core.media import winrt_wait
+
+    assert winrt_wait(_Op(42)) == 42
+    stuck = _Op(status=0)
+    with pytest.raises(TimeoutError):
+        winrt_wait(stuck)
+    assert stuck.cancelled
+    with pytest.raises(OSError):
+        winrt_wait(_Op(status=3, error=OSError("refusé")))
+
+    class NoWait:                       # opération sans wait() : état surveillé
+        def __init__(self):
+            self.polls = 0
+
+        @property
+        def status(self):
+            self.polls += 1
+            return 1 if self.polls > 3 else 0
+
+        def get_results(self):
+            return "fini"
+
+    assert winrt_wait(NoWait()) == "fini"
+
+
+def test_windows_media_thread(qapp, fake_winrt):
+    """Thread des contrôles média : morceau, pochette, état de lecture, commandes."""
+    from core.media import MediaInfo, WindowsMedia, read_cover
+
+    assert read_cover(_Reference(b"\x89PNG-data")) == b"\x89PNG-data"
+    assert read_cover(None) == b""
+
+    media = WindowsMedia()
+    seen = []
+    media.changed.connect(seen.append)
+    media.start()
+    try:
+        pump(qapp, 0.3)
+        assert seen and seen[-1] == MediaInfo("Morceau A", "Artiste A", "Album", "Spotify", True,
+                                              can_previous=False, cover=b"cover-A")
+        media.play_pause()
+        pump(qapp, 0.4)
+        assert fake_winrt.calls == ["play_pause"] and not media.current.playing
+        media.next()
+        pump(qapp, 0.4)
+        assert media.current.title == "Morceau B" and media.current.cover == b"cover-B"
+        assert media.current.can_previous
+        media.previous()
+        pump(qapp, 0.4)
+        assert fake_winrt.calls == ["play_pause", "next", "previous"]
+        assert media.current.title == "Morceau A"
+    finally:
+        media.stop()
+    assert media._thread is None
+
+
+def test_windows_media_without_session(qapp, fake_winrt, monkeypatch):
+    from core.media import WindowsMedia
+
+    monkeypatch.setattr(fake_winrt, "tracks", [("", "", b"")])     # session sans titre
+    media = WindowsMedia()
+    media.start()
+    try:
+        pump(qapp, 0.3)
+        assert media.current is None
+        media.next()                        # commande sans morceau : pas d'erreur
+        pump(qapp, 0.3)
+    finally:
+        media.stop()
+
+
+def test_media_backend_choice(monkeypatch):
+    from core import media
+
+    monkeypatch.setattr(media.sys, "platform", "linux")
+    assert not media.create_media_backend({}).available
+    monkeypatch.setattr(media.sys, "platform", "win32")
+    monkeypatch.setattr(media.importlib.util, "find_spec", lambda name: None)
+    backend = media.create_media_backend({})
+    assert not backend.available and "winrt" in backend.reason
+    monkeypatch.setattr(media.importlib.util, "find_spec", lambda name: object())
+    assert isinstance(media.create_media_backend({}), media.WindowsMedia)
+
+
+def test_run_in_mta(fake_winrt):
+    from core.media import run_in_mta
+
+    assert run_in_mta(lambda: 5) == 5
+    with pytest.raises(ValueError):
+        run_in_mta(lambda: int("pas un nombre"))
